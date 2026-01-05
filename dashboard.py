@@ -137,12 +137,14 @@ def render_buy_list(df, unique_key, user_id):
         # Industry & PE
         ind = row.get('Industry', '-')
         pe = row.get('PE', 0)
-        c[6].caption(f"{ind} | PE:{pe}")
+        c[6].caption(f"{ind} | 市盈率:{pe}")
 
         # Financing & Northbound
-        fin = row.get('Financing Net', 0)
-        nb = row.get('NB Inflow', 0)
-        c[7].caption(f"融:{fin}万 | 北:{nb}万")
+        fin_val = row.get('Financing Net', 0)
+        nb_val = row.get('NB Inflow', 0)
+        fin_str = f"{fin_val}万" if fin_val != 0 else "-"
+        nb_str = f"{nb_val}万" if nb_val != 0 else "-"
+        c[7].caption(f"融:{fin_str} | 北:{nb_str}")
         
         # Button
         if c[8].button("🟢 买", key=f"btn_buy_{unique_key}_{user_id}_{row['Code']}"):
@@ -201,10 +203,9 @@ if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
     st.rerun()
 
-use_realtime = st.sidebar.toggle("📡 开启实时行情 (盘中)", value=False)
+    use_realtime = st.sidebar.button("📡 获取实时行情 (盘中)")
 
-page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"])
-
+    page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"])
 # --- Flash Trade Panel ---
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"⚡ 闪电交易 ({current_user})")
@@ -247,7 +248,7 @@ if report_df.empty:
     st.error("数据未加载，请运行 data_loader.py")
     st.stop()
 
-if use_realtime:
+if get_realtime:
     with st.spinner("📡 同步交易所行情..."):
         report_df = enrich_with_realtime_data(report_df)
 else:
