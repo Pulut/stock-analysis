@@ -81,9 +81,13 @@ def enrich_with_realtime_data(df):
         real_df['Open_Pct'] = real_df['Open_Pct'].fillna(0).round(2)
         
         merged_df = pd.merge(df, real_df, on='Code', how='left')
-        merged_df['Real_Price'].fillna(merged_df['Close'], inplace=True)
-        merged_df['Real_Chg_Pct'].fillna(0, inplace=True)
-        merged_df['Vol_Ratio'].fillna(0, inplace=True)
+        merged_df['Real_Price'] = merged_df['Real_Price'].fillna(merged_df['Close'])
+
+        # If realtime quote is missing (e.g., suspended stock), fall back to last trading day's pct change.
+        if 'Chg%' in merged_df.columns:
+            merged_df['Real_Chg_Pct'] = merged_df['Real_Chg_Pct'].fillna(merged_df['Chg%'])
+        merged_df['Real_Chg_Pct'] = merged_df['Real_Chg_Pct'].fillna(0)
+        merged_df['Vol_Ratio'] = merged_df['Vol_Ratio'].fillna(0)
         return merged_df
     except Exception as e:
         st.warning(f"无法获取实时行情: {e}")
@@ -203,9 +207,9 @@ if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
     st.rerun()
 
-    use_realtime = st.sidebar.button("📡 获取实时行情 (盘中)")
+get_realtime = st.sidebar.button("📡 获取实时行情 (盘中)")
 
-    page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"])
+page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"])
 # --- Flash Trade Panel ---
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"⚡ 闪电交易 ({current_user})")
@@ -253,7 +257,9 @@ if get_realtime:
         report_df = enrich_with_realtime_data(report_df)
 else:
     report_df['Real_Price'] = report_df['Close']
-    report_df['Real_Chg_Pct'] = 0.0
+    # Fallback: use last trading day's pct change from the analysis snapshot.
+    report_df['Real_Chg_Pct'] = report_df.get('Chg%', 0.0)
+    report_df['Real_Chg_Pct'] = report_df['Real_Chg_Pct'].fillna(0.0)
     report_df['Open_Pct'] = 0.0
     report_df['Vol_Ratio'] = 0.0
 

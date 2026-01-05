@@ -9,6 +9,31 @@ def get_db_connection():
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
+def get_latest_common_trade_date(conn):
+    """
+    Returns the latest common trade_date across daily/margin/northbound tables.
+
+    daily_market often updates earlier than margin/northbound. If we build the report on a
+    date that exists only in daily_market, financing/northbound columns will be NaN and
+    later filled as 0, making the dashboard "资金(融/北)" column look empty.
+    """
+    tables = ["daily_market", "margin_data", "northbound_data"]
+    max_dates = []
+
+    for table in tables:
+        try:
+            max_date = pd.read_sql(f"SELECT MAX(trade_date) AS max_date FROM {table}", conn).iloc[0, 0]
+        except Exception:
+            max_date = None
+
+        if max_date:
+            max_dates.append(pd.to_datetime(max_date))
+
+    if not max_dates:
+        return None
+
+    return min(max_dates).strftime("%Y-%m-%d")
+
 def get_stock_data(stock_code: str, conn):
     """
     Legacy function: Loads all relevant data for a single stock.
@@ -65,7 +90,7 @@ def get_stock_data(stock_code: str, conn):
 
 def get_market_sentiment(conn):
     try:
-        last_date = pd.read_sql("SELECT MAX(trade_date) FROM daily_market", conn).iloc[0, 0]
+        last_date = get_latest_common_trade_date(conn) or pd.read_sql("SELECT MAX(trade_date) FROM daily_market", conn).iloc[0, 0]
         if not last_date:
             return "⚪️ 数据不足", 0, 0, ""
 
@@ -164,8 +189,12 @@ def get_full_analysis_report():
     
     # 2. Determine Date Range (Last 60 days for MAs)
     try:
-        max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
-        max_date_str = max_date_res.iloc[0]['max_date']
+        end_date_str = get_latest_common_trade_date(conn)
+        if not end_date_str:
+            max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
+            end_date_str = max_date_res.iloc[0]['max_date']
+
+        max_date_str = end_date_str
         if not max_date_str:
             conn.close()
             return pd.DataFrame()
@@ -177,13 +206,22 @@ def get_full_analysis_report():
         conn.close()
         return pd.DataFrame()
 
-    print(f"Loading Market Data from {start_date_str}...")
+    print(f"Loading Market Data from {start_date_str} to {end_date_str}...")
     
     # 3. Bulk Load Tables
-    daily_df = pd.read_sql(f"SELECT * FROM daily_market WHERE trade_date >= '{start_date_str}'", conn)
-    margin_df = pd.read_sql(f"SELECT * FROM margin_data WHERE trade_date >= '{start_date_str}'", conn)
+    daily_df = pd.read_sql(
+        f"SELECT * FROM daily_market WHERE trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+        conn,
+    )
+    margin_df = pd.read_sql(
+        f"SELECT * FROM margin_data WHERE trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+        conn,
+    )
     try:
-        nb_df = pd.read_sql(f"SELECT * FROM northbound_data WHERE trade_date >= '{start_date_str}'", conn)
+        nb_df = pd.read_sql(
+            f"SELECT * FROM northbound_data WHERE trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+            conn,
+        )
     except:
         nb_df = pd.DataFrame()
 

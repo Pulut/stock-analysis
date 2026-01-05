@@ -120,52 +120,80 @@ def download_daily_data(stock_codes, default_start_date="20250101"):
     
     # Pre-fetch latest dates to minimize DB queries in the loop
     cursor.execute("SELECT code, MAX(trade_date) FROM daily_market GROUP BY code")
-    latest_dates = dict(cursor.fetchall()) 
+    latest_market_dates = dict(cursor.fetchall())
+
+    # NOTE: daily_market may update earlier than margin_data. If we use daily's latest date
+    # as the start_date for margin as well, SSE margin can get stuck forever (never catch up).
+    cursor.execute(
+        "SELECT code, MAX(trade_date) FROM margin_data "
+        "WHERE code LIKE '60%' OR code LIKE '68%' GROUP BY code"
+    )
+    latest_sse_margin_dates = dict(cursor.fetchall())
 
     for i, code in enumerate(stock_codes):
         try:
-            # Determine start date
-            last_date_str = latest_dates.get(code)
-            
-            if last_date_str:
-                last_date = datetime.datetime.strptime(last_date_str, "%Y-%m-%d")
-                next_day = last_date + datetime.timedelta(days=1)
-                start_date = next_day.strftime("%Y%m%d")
-                if next_day > datetime.datetime.now():
-                    continue 
-            else:
-                start_date = default_start_date
+            now = datetime.datetime.now()
+            today_str = now.strftime("%Y%m%d")
 
-            if start_date > datetime.datetime.now().strftime("%Y%m%d"):
-                 continue
+            # Determine daily_market start date
+            daily_start_date = None
+            last_market_date_str = latest_market_dates.get(code)
+            if last_market_date_str:
+                last_market_date = datetime.datetime.strptime(last_market_date_str, "%Y-%m-%d")
+                next_day = last_market_date + datetime.timedelta(days=1)
+                if next_day <= now:
+                    daily_start_date = next_day.strftime("%Y%m%d")
+            else:
+                daily_start_date = default_start_date
+
+            need_daily = bool(daily_start_date and daily_start_date <= today_str)
+
+            # Determine SSE margin_data start date (independent from daily_market)
+            margin_start_date = None
+            need_margin = False
+            if code.startswith(("60", "68")):
+                last_margin_date_str = latest_sse_margin_dates.get(code)
+                if last_margin_date_str:
+                    last_margin_date = datetime.datetime.strptime(last_margin_date_str, "%Y-%m-%d")
+                    margin_next_day = last_margin_date + datetime.timedelta(days=1)
+                    if margin_next_day <= now:
+                        margin_start_date = margin_next_day.strftime("%Y%m%d")
+                else:
+                    margin_start_date = default_start_date
+
+                need_margin = bool(margin_start_date and margin_start_date <= today_str)
+
+            if not need_daily and not need_margin:
+                continue
 
             # -----------------------------------------------
             # A. Get Daily Market Data (OHLCV + Turnover)
             # -----------------------------------------------
-            stock_daily = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, adjust="qfq")
-            
-            if not stock_daily.empty:
-                daily_records = []
-                for _, row in stock_daily.iterrows():
-                    date_str = row['日期']
-                    daily_records.append((
-                        code, date_str, 
-                        row['开盘'], row['最高'], row['最低'], row['收盘'], 
-                        row['成交量'], row['换手率']
-                    ))
+            if need_daily:
+                stock_daily = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=daily_start_date, adjust="qfq")
                 
-                cursor.executemany('''
-                    INSERT OR REPLACE INTO daily_market (code, trade_date, open, high, low, close, volume, turnover_rate)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', daily_records)
+                if not stock_daily.empty:
+                    daily_records = []
+                    for _, row in stock_daily.iterrows():
+                        date_str = row['日期']
+                        daily_records.append((
+                            code, date_str, 
+                            row['开盘'], row['最高'], row['最低'], row['收盘'], 
+                            row['成交量'], row['换手率']
+                        ))
+                    
+                    cursor.executemany('''
+                        INSERT OR REPLACE INTO daily_market (code, trade_date, open, high, low, close, volume, turnover_rate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', daily_records)
 
             # -----------------------------------------------
             # B. Get Margin Data (SSE ONLY)
             # -----------------------------------------------
-            if code.startswith(('60', '68')):
+            if need_margin:
                 try:
-                    end_date = datetime.datetime.now().strftime("%Y%m%d")
-                    margin_df = ak.stock_margin_detail_sse(symbol=code, start_date=start_date, end_date=end_date)
+                    end_date = today_str
+                    margin_df = ak.stock_margin_detail_sse(symbol=code, start_date=margin_start_date, end_date=end_date)
                     
                     if not margin_df.empty:
                         margin_records = []
