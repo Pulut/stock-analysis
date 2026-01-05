@@ -1,0 +1,31 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 虚拟环境
+venv/
+.venv/
+env/
+ENV/
+
+# 日志文件
+*.log
+st_out.log
+st_err.log
+streamlit_out.log
+streamlit_err.log
+
+# 数据库临时文件 (关键：不要上传正在运行时的锁文件)
+*.db-journal
+*.db-shm
+*.db-wal
+
+# 调试脚本与启动器
+launcher.vbs
+debug_szse.py
+run_stock_system.bat
+
+# Streamlit 配置 (如果是包含私密信息的 .streamlit/secrets.toml)
+# .streamlit/config.toml 通常可以上传
