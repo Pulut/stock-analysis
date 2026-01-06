@@ -26,6 +26,7 @@ streamlit_err.log
 launcher.vbs
 debug_szse.py
 run_stock_system.bat
+run_data_loader_and_push.bat
 
 # Streamlit 配置 (如果是包含私密信息的 .streamlit/secrets.toml)
 # .streamlit/config.toml 通常可以上传

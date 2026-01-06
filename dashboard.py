@@ -105,8 +105,43 @@ def get_db_connection():
 # --- Custom Table Renderers with Buttons ---
 def render_buy_list(df, unique_key, user_id):
     """Renders a detailed list of stocks with 'Buy' buttons."""
+    def _fmt_colored_signed(label, value, suffix):
+        try:
+            value = float(value)
+        except Exception:
+            return "-"
+        if value == 0:
+            return "-"
+        color = "red" if value > 0 else "green"
+        return f":{color}[{label}{value:+.2f}{suffix}]"
+
+    def _fmt_colored_pct(label, value):
+        try:
+            value = float(value)
+        except Exception:
+            return "-"
+        if value == 0:
+            return "-"
+        color = "red" if value > 0 else "green"
+        return f":{color}[{label}{value:+.2f}%]"
+
+    def _fmt_pe_colored(pe_value):
+        try:
+            pe_value = float(pe_value)
+        except Exception:
+            return "市盈率:-"
+
+        # Negative PE usually means亏损; keep it green (bad) to match A股 red/up green/down convention.
+        if pe_value <= 0:
+            return f":green[市盈率:{pe_value:.1f}]"
+        if pe_value <= 20:
+            return f":red[市盈率:{pe_value:.1f}]"
+        if pe_value <= 50:
+            return f":orange[市盈率:{pe_value:.1f}]"
+        return f":violet[市盈率:{pe_value:.1f}]"
+
     # Code, Name, Price, Chg, Signal, Sector/MV, Ind/PE, Fin/NB, Action
-    cols = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 0.7])
+    cols = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 1.0, 0.7])
     cols[0].markdown("**代码**")
     cols[1].markdown("**名称**")
     cols[2].markdown("**现价**")
@@ -115,12 +150,14 @@ def render_buy_list(df, unique_key, user_id):
     cols[5].markdown("**板块/市值**")
     cols[6].markdown("**行业/PE**")
     cols[7].markdown("**资金(融/北)**")
-    cols[8].markdown("**操作**")
+    cols[8].markdown("**资金/流通市值%**")
+    cols[9].markdown("**资金/总市值%**")
+    cols[10].markdown("**操作**")
     
     st.markdown("---")
 
     for idx, row in df.iterrows():
-        c = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 0.7])
+        c = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 1.0, 0.7])
         c[0].write(row['Code'])
         c[1].write(row['Name'])
         c[2].write(f"{row.get('Real_Price', 0):.2f}")
@@ -141,17 +178,48 @@ def render_buy_list(df, unique_key, user_id):
         # Industry & PE
         ind = row.get('Industry', '-')
         pe = row.get('PE', 0)
-        c[6].caption(f"{ind} | 市盈率:{pe}")
+        pe_str = _fmt_pe_colored(pe)
+        c[6].markdown(f"{ind} | {pe_str}")
 
         # Financing & Northbound
         fin_val = row.get('Financing Net', 0)
         nb_val = row.get('NB Inflow', 0)
-        fin_str = f"{fin_val}万" if fin_val != 0 else "-"
-        nb_str = f"{nb_val}万" if nb_val != 0 else "-"
-        c[7].caption(f"融:{fin_str} | 北:{nb_str}")
+        fin_str = _fmt_colored_signed("融:", fin_val, "万")
+        nb_str = _fmt_colored_signed("北:", nb_val, "万")
+        c[7].markdown(f"{fin_str} | {nb_str}")
+
+        fin_pct = row.get('Fin/MV%', 0)
+        nb_pct = row.get('NB/MV%', 0)
+        try:
+            fin_pct = float(fin_pct)
+        except Exception:
+            fin_pct = 0.0
+        try:
+            nb_pct = float(nb_pct)
+        except Exception:
+            nb_pct = 0.0
+
+        fin_pct_str = _fmt_colored_pct("融:", fin_pct)
+        nb_pct_str = _fmt_colored_pct("北:", nb_pct)
+        c[8].markdown(f"{fin_pct_str} | {nb_pct_str}")
+
+        fin_tmv_pct = row.get('Fin/TMV%', 0)
+        nb_tmv_pct = row.get('NB/TMV%', 0)
+        try:
+            fin_tmv_pct = float(fin_tmv_pct)
+        except Exception:
+            fin_tmv_pct = 0.0
+        try:
+            nb_tmv_pct = float(nb_tmv_pct)
+        except Exception:
+            nb_tmv_pct = 0.0
+
+        fin_tmv_pct_str = _fmt_colored_pct("融:", fin_tmv_pct)
+        nb_tmv_pct_str = _fmt_colored_pct("北:", nb_tmv_pct)
+        c[9].markdown(f"{fin_tmv_pct_str} | {nb_tmv_pct_str}")
         
         # Button
-        if c[8].button("🟢 买", key=f"btn_buy_{unique_key}_{user_id}_{row['Code']}"):
+        if c[10].button("🟢 买", key=f"btn_buy_{unique_key}_{user_id}_{row['Code']}"):
             price = row.get('Real_Price', 0)
             if price > 0:
                 succ, msg = trader.execute_trade(user_id, 'BUY', row['Code'], row['Name'], price, 100)

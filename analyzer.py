@@ -90,7 +90,9 @@ def get_stock_data(stock_code: str, conn):
 
 def get_market_sentiment(conn):
     try:
-        last_date = get_latest_common_trade_date(conn) or pd.read_sql("SELECT MAX(trade_date) FROM daily_market", conn).iloc[0, 0]
+        last_date = get_latest_common_trade_date(conn)
+        if not last_date:
+            last_date = pd.read_sql("SELECT MAX(trade_date) AS max_date FROM daily_market", conn).iloc[0, 0]
         if not last_date:
             return "⚪️ 数据不足", 0, 0, ""
 
@@ -191,15 +193,10 @@ def get_full_analysis_report():
     try:
         end_date_str = get_latest_common_trade_date(conn)
         if not end_date_str:
-            max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
-            end_date_str = max_date_res.iloc[0]['max_date']
-
-        max_date_str = end_date_str
-        if not max_date_str:
             conn.close()
             return pd.DataFrame()
         
-        end_date = pd.to_datetime(max_date_str)
+        end_date = pd.to_datetime(end_date_str)
         start_date = end_date - pd.Timedelta(days=60)
         start_date_str = start_date.strftime('%Y-%m-%d')
     except:
@@ -243,15 +240,24 @@ def get_full_analysis_report():
     if not nb_df.empty:
         merged = pd.merge(merged, nb_df, on=['code', 'trade_date'], how='left')
     else:
-        merged['nb_hold_val'] = 0.0
-        
-    # Fill NAs
-    cols_to_fill = ['financing_buy', 'financing_balance', 'net_financing_buy', 'nb_hold_val']
-    for c in cols_to_fill:
-        if c in merged.columns:
-            merged[c] = merged[c].fillna(0)
-        else:
-            merged[c] = 0.0
+        merged['nb_hold_val'] = float('nan')
+
+    merged = merged.sort_values(['code', 'trade_date'])
+
+    # Carry forward "balance/position" style fields when funding tables lag daily_market.
+    for col in ['financing_balance', 'securities_balance', 'nb_hold_val']:
+        if col in merged.columns:
+            merged[col] = merged.groupby('code')[col].ffill()
+
+    # Fill NAs (non-margin/northbound stocks or leading gaps)
+    for col in ['financing_buy', 'financing_balance', 'net_financing_buy']:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        merged[col] = merged[col].fillna(0)
+
+    # NB Inflow (Diff of holding value); avoid false spikes for first available day.
+    merged['nb_inflow'] = merged.groupby('code')['nb_hold_val'].diff().fillna(0)
+    merged['nb_hold_val'] = merged['nb_hold_val'].fillna(0)
 
     # 6. Vectorized Calculations
     # Map float_mv from basic_df
@@ -264,10 +270,6 @@ def get_full_analysis_report():
     mask_mv = (merged['float_mv'] > 0)
     merged.loc[mask_mv, 'financing_surge_pct'] = merged.loc[mask_mv, 'net_financing_buy'] / merged.loc[mask_mv, 'float_mv']
 
-    # NB Inflow (Diff of holding value)
-    merged = merged.sort_values(['code', 'trade_date'])
-    merged['nb_inflow'] = merged.groupby('code')['nb_hold_val'].diff().fillna(0)
-    
     # Moving Averages
     # rolling() on groupby is reasonably fast
     merged['close_20d_avg'] = merged.groupby('code')['close'].rolling(20, min_periods=1).mean().reset_index(0, drop=True)
@@ -313,6 +315,44 @@ def get_full_analysis_report():
         # Generate Signal
         signal = generate_signals_row(row, info_dict)
 
+        float_mv = 0.0
+        try:
+            float_mv = float(info_dict.get('float_mv', 0) or 0)
+        except Exception:
+            float_mv = 0.0
+
+        total_mv = 0.0
+        try:
+            total_mv = float(info_dict.get('total_mv', 0) or 0)
+        except Exception:
+            total_mv = 0.0
+
+        fin_net = 0.0
+        try:
+            fin_net = float(row.get('net_financing_buy', 0) or 0)
+        except Exception:
+            fin_net = 0.0
+
+        nb_inflow = 0.0
+        try:
+            nb_inflow = float(row.get('nb_inflow', 0) or 0)
+        except Exception:
+            nb_inflow = 0.0
+
+        if float_mv > 0:
+            fin_mv_pct = fin_net / float_mv * 100
+            nb_mv_pct = nb_inflow / float_mv * 100
+        else:
+            fin_mv_pct = 0.0
+            nb_mv_pct = 0.0
+
+        if total_mv > 0:
+            fin_tmv_pct = fin_net / total_mv * 100
+            nb_tmv_pct = nb_inflow / total_mv * 100
+        else:
+            fin_tmv_pct = 0.0
+            nb_tmv_pct = 0.0
+
         results.append({
             "Code": code,
             "Name": info_dict['name'],
@@ -328,6 +368,10 @@ def get_full_analysis_report():
             "Financing Net": round(row['net_financing_buy'] / 10000, 2), 
             "Northbound Hold": round(row['nb_hold_val'] / 100000000, 2), 
             "NB Inflow": round(row['nb_inflow'] / 10000, 2), 
+            "Fin/MV%": round(fin_mv_pct, 2),
+            "NB/MV%": round(nb_mv_pct, 2),
+            "Fin/TMV%": round(fin_tmv_pct, 2),
+            "NB/TMV%": round(nb_tmv_pct, 2),
             "Surge Score": round(row['financing_surge_pct'] * 1000, 2) 
         })
         
