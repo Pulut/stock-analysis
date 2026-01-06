@@ -34,6 +34,20 @@ def get_latest_common_trade_date(conn):
 
     return min(max_dates).strftime("%Y-%m-%d")
 
+def get_table_max_dates(conn):
+    """Return MAX(trade_date) for each core table."""
+    tables = ["daily_market", "margin_data", "northbound_data"]
+    result = {}
+
+    for table in tables:
+        try:
+            max_date = pd.read_sql(f"SELECT MAX(trade_date) AS max_date FROM {table}", conn).iloc[0, 0]
+        except Exception:
+            max_date = None
+        result[table] = max_date
+
+    return result
+
 def get_stock_data(stock_code: str, conn):
     """
     Legacy function: Loads all relevant data for a single stock.
@@ -90,9 +104,7 @@ def get_stock_data(stock_code: str, conn):
 
 def get_market_sentiment(conn):
     try:
-        last_date = get_latest_common_trade_date(conn)
-        if not last_date:
-            last_date = pd.read_sql("SELECT MAX(trade_date) AS max_date FROM daily_market", conn).iloc[0, 0]
+        last_date = pd.read_sql("SELECT MAX(trade_date) AS max_date FROM daily_market", conn).iloc[0, 0]
         if not last_date:
             return "⚪️ 数据不足", 0, 0, ""
 
@@ -191,7 +203,8 @@ def get_full_analysis_report():
     
     # 2. Determine Date Range (Last 60 days for MAs)
     try:
-        end_date_str = get_latest_common_trade_date(conn)
+        max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
+        end_date_str = max_date_res.iloc[0]['max_date']
         if not end_date_str:
             conn.close()
             return pd.DataFrame()
@@ -231,21 +244,25 @@ def get_full_analysis_report():
     daily_df['trade_date'] = pd.to_datetime(daily_df['trade_date'])
     if not margin_df.empty:
         margin_df['trade_date'] = pd.to_datetime(margin_df['trade_date'])
+
+    nb_hold_map = {}
+    nb_inflow_map = {}
     if not nb_df.empty:
         nb_df['trade_date'] = pd.to_datetime(nb_df['trade_date'])
         nb_df = nb_df.rename(columns={'net_inflow': 'nb_hold_val'})
+        nb_df = nb_df.sort_values(['code', 'trade_date'])
+        nb_df['nb_inflow'] = nb_df.groupby('code')['nb_hold_val'].diff()
+        nb_latest = nb_df.groupby('code').tail(1)
+        nb_hold_map = nb_latest.set_index('code')['nb_hold_val'].to_dict()
+        nb_inflow_map = nb_latest.set_index('code')['nb_inflow'].fillna(0).to_dict()
 
     # 5. Merging (Left Join on Code + Date)
     merged = pd.merge(daily_df, margin_df, on=['code', 'trade_date'], how='left')
-    if not nb_df.empty:
-        merged = pd.merge(merged, nb_df, on=['code', 'trade_date'], how='left')
-    else:
-        merged['nb_hold_val'] = float('nan')
 
     merged = merged.sort_values(['code', 'trade_date'])
 
     # Carry forward "balance/position" style fields when funding tables lag daily_market.
-    for col in ['financing_balance', 'securities_balance', 'nb_hold_val']:
+    for col in ['financing_balance', 'securities_balance']:
         if col in merged.columns:
             merged[col] = merged.groupby('code')[col].ffill()
 
@@ -254,10 +271,6 @@ def get_full_analysis_report():
         if col not in merged.columns:
             merged[col] = 0.0
         merged[col] = merged[col].fillna(0)
-
-    # NB Inflow (Diff of holding value); avoid false spikes for first available day.
-    merged['nb_inflow'] = merged.groupby('code')['nb_hold_val'].diff().fillna(0)
-    merged['nb_hold_val'] = merged['nb_hold_val'].fillna(0)
 
     # 6. Vectorized Calculations
     # Map float_mv from basic_df
@@ -312,8 +325,13 @@ def get_full_analysis_report():
             'industry': info['industry']
         }
 
+        nb_inflow_raw = nb_inflow_map.get(code, 0.0)
+        nb_hold_raw = nb_hold_map.get(code, 0.0)
+
         # Generate Signal
-        signal = generate_signals_row(row, info_dict)
+        row_for_signal = row.copy()
+        row_for_signal['nb_inflow'] = nb_inflow_raw
+        signal = generate_signals_row(row_for_signal, info_dict)
 
         float_mv = 0.0
         try:
@@ -335,9 +353,15 @@ def get_full_analysis_report():
 
         nb_inflow = 0.0
         try:
-            nb_inflow = float(row.get('nb_inflow', 0) or 0)
+            nb_inflow = float(nb_inflow_raw or 0)
         except Exception:
             nb_inflow = 0.0
+
+        nb_hold_val = 0.0
+        try:
+            nb_hold_val = float(nb_hold_raw or 0)
+        except Exception:
+            nb_hold_val = 0.0
 
         if float_mv > 0:
             fin_mv_pct = fin_net / float_mv * 100
@@ -366,8 +390,8 @@ def get_full_analysis_report():
             "Turnover%": round(row['turnover_rate'], 2),
             "Financing Bal": round(row['financing_balance'] / 100000000, 2), 
             "Financing Net": round(row['net_financing_buy'] / 10000, 2), 
-            "Northbound Hold": round(row['nb_hold_val'] / 100000000, 2), 
-            "NB Inflow": round(row['nb_inflow'] / 10000, 2), 
+            "Northbound Hold": round(nb_hold_val / 100000000, 2), 
+            "NB Inflow": round(nb_inflow / 10000, 2), 
             "Fin/MV%": round(fin_mv_pct, 2),
             "NB/MV%": round(nb_mv_pct, 2),
             "Fin/TMV%": round(fin_tmv_pct, 2),

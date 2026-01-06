@@ -337,19 +337,29 @@ if page == "市场概览":
     
     conn = get_db_connection()
     sentiment, up, down, last_date = analyzer.get_market_sentiment(conn)
+    max_dates = analyzer.get_table_max_dates(conn)
     conn.close()
     
-    st.markdown(f"**📅 分析日期**: {last_date} | **🌡️ 大盘**: {sentiment} (📈{up} : 📉{down})")
+    daily_date = max_dates.get("daily_market") or last_date
+    margin_date = max_dates.get("margin_data") or "-"
+    nb_date = max_dates.get("northbound_data") or "-"
+
+    st.markdown(
+        f"**📅 分析日期(行情)**: {daily_date} | **融数据**: {margin_date} | **北向数据**: {nb_date} "
+        f"| **🌡️ 大盘**: {sentiment} (📈{up} : 📉{down})"
+    )
+    if nb_date != "-" and daily_date and nb_date != daily_date:
+        st.caption(f"北向数据尚未更新到 {daily_date}，北向相关榜单/指标截至 {nb_date}")
     st.progress(up/(up+down) if (up+down)>0 else 0)
     st.markdown("---")
     
-    st.subheader("🔥 融资净买入强度榜 (Top 10)")
+    st.subheader(f"🔥 融资净买入强度榜 (Top 10, 截至 {margin_date})")
     top_financing = report_df.sort_values(by="Surge Score", ascending=False).head(10)
     render_buy_list(top_financing, "financing", current_user)
     
     st.markdown("---")
     
-    st.subheader("💰 北向资金扫货榜 (Top 10)")
+    st.subheader(f"💰 北向资金扫货榜 (Top 10, 截至 {nb_date})")
     top_north = report_df.sort_values(by="NB Inflow", ascending=False).head(10)
     render_buy_list(top_north, "north", current_user)
 
