@@ -17,7 +17,7 @@ def get_latest_common_trade_date(conn):
     date that exists only in daily_market, financing/northbound columns will be NaN and
     later filled as 0, making the dashboard "资金(融/北)" column look empty.
     """
-    tables = ["daily_market", "margin_data", "northbound_data"]
+    tables = ["daily_market", "margin_data", "northbound_data", "main_fund_flow"]
     max_dates = []
 
     for table in tables:
@@ -36,7 +36,7 @@ def get_latest_common_trade_date(conn):
 
 def get_table_max_dates(conn):
     """Return MAX(trade_date) for each core table."""
-    tables = ["daily_market", "margin_data", "northbound_data"]
+    tables = ["daily_market", "margin_data", "northbound_data", "main_fund_flow"]
     result = {}
 
     for table in tables:
@@ -228,6 +228,13 @@ def get_full_analysis_report():
         conn,
     )
     try:
+        main_df = pd.read_sql(
+            f"SELECT * FROM main_fund_flow WHERE trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+            conn,
+        )
+    except:
+        main_df = pd.DataFrame()
+    try:
         nb_df = pd.read_sql(
             f"SELECT * FROM northbound_data WHERE trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
             conn,
@@ -244,6 +251,8 @@ def get_full_analysis_report():
     daily_df['trade_date'] = pd.to_datetime(daily_df['trade_date'])
     if not margin_df.empty:
         margin_df['trade_date'] = pd.to_datetime(margin_df['trade_date'])
+    if not main_df.empty:
+        main_df['trade_date'] = pd.to_datetime(main_df['trade_date'])
 
     nb_hold_map = {}
     nb_inflow_map = {}
@@ -258,6 +267,8 @@ def get_full_analysis_report():
 
     # 5. Merging (Left Join on Code + Date)
     merged = pd.merge(daily_df, margin_df, on=['code', 'trade_date'], how='left')
+    if not main_df.empty:
+        merged = pd.merge(merged, main_df, on=['code', 'trade_date'], how='left')
 
     merged = merged.sort_values(['code', 'trade_date'])
 
@@ -271,6 +282,10 @@ def get_full_analysis_report():
         if col not in merged.columns:
             merged[col] = 0.0
         merged[col] = merged[col].fillna(0)
+
+    if 'main_net_inflow' not in merged.columns:
+        merged['main_net_inflow'] = 0.0
+    merged['main_net_inflow'] = merged['main_net_inflow'].fillna(0)
 
     # 6. Vectorized Calculations
     # Map float_mv from basic_df
@@ -392,6 +407,7 @@ def get_full_analysis_report():
             "Financing Net": round(row['net_financing_buy'] / 10000, 2), 
             "Northbound Hold": round(nb_hold_val / 100000000, 2), 
             "NB Inflow": round(nb_inflow / 10000, 2), 
+            "Main Inflow": round(row.get('main_net_inflow', 0) / 10000, 2),
             "Fin/MV%": round(fin_mv_pct, 2),
             "NB/MV%": round(nb_mv_pct, 2),
             "Fin/TMV%": round(fin_tmv_pct, 2),

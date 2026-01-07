@@ -489,6 +489,80 @@ def download_northbound_data(start_date="20250101"):
     conn.close()
     print("Northbound data download complete.")
 
+def download_main_fund_flow_data():
+    """
+    Step 5: Download Main Force Net Inflow (主力净流入).
+
+    Data source: Eastmoney fund flow ranking (AkShare: stock_individual_fund_flow_rank, 今日).
+    Note: The endpoint does not accept an explicit trade_date; we store it against the latest
+    trading day available in daily_market.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    print("Starting Main Fund Flow (主力净流入) data download...")
+
+    # Align to daily_market calendar
+    cursor.execute("SELECT MAX(trade_date) FROM daily_market")
+    trade_date = cursor.fetchone()[0]
+    if not trade_date:
+        conn.close()
+        print("[MainFund] No daily_market data; skip.")
+        return
+
+    try:
+        df = ak.stock_individual_fund_flow_rank(indicator="今日")
+    except Exception as e:
+        conn.close()
+        print(f"[MainFund] Error fetching fund flow rank: {e}")
+        return
+
+    if df is None or df.empty:
+        conn.close()
+        print("[MainFund] Empty data; skip.")
+        return
+
+    code_col = "代码" if "代码" in df.columns else None
+    inflow_col = "今日主力净流入-净额" if "今日主力净流入-净额" in df.columns else None
+
+    # Fallback in case AkShare renames columns
+    if not code_col:
+        candidates = [c for c in df.columns if "代码" in str(c)]
+        code_col = candidates[0] if candidates else None
+    if not inflow_col:
+        candidates = [c for c in df.columns if "主力净流入" in str(c) and "净额" in str(c)]
+        inflow_col = candidates[0] if candidates else None
+
+    if not code_col or not inflow_col:
+        conn.close()
+        print(f"[MainFund] Unexpected columns: {list(df.columns)}")
+        return
+
+    records = []
+    for _, row in df.iterrows():
+        code = str(row.get(code_col, "")).zfill(6)
+        if not code or code == "000000":
+            continue
+        try:
+            main_net_inflow = float(row.get(inflow_col, 0) or 0)
+        except Exception:
+            continue
+        records.append((code, trade_date, main_net_inflow))
+
+    if not records:
+        conn.close()
+        print(f"[MainFund] No valid rows for {trade_date}")
+        return
+
+    cursor.execute("DELETE FROM main_fund_flow WHERE trade_date = ?", (trade_date,))
+    cursor.executemany(
+        "INSERT OR REPLACE INTO main_fund_flow (code, trade_date, main_net_inflow) VALUES (?, ?, ?)",
+        records,
+    )
+    conn.commit()
+    conn.close()
+    print(f"[MainFund] Updated {len(records)} records for {trade_date}")
+
 def init_tables():
     """Ensure all data tables exist."""
     conn = get_db_connection()
@@ -529,6 +603,15 @@ def init_tables():
             PRIMARY KEY (code, trade_date)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS main_fund_flow (
+            code TEXT,
+            trade_date DATE,
+            main_net_inflow REAL,
+            PRIMARY KEY (code, trade_date)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -547,3 +630,6 @@ if __name__ == "__main__":
     
     # 4. Northbound
     download_northbound_data(start_date="20250101")
+
+    # 5. Main Fund Flow (主力净流入)
+    download_main_fund_flow_data()

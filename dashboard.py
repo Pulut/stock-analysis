@@ -149,7 +149,7 @@ def render_buy_list(df, unique_key, user_id):
     cols[4].markdown("**信号建议**")
     cols[5].markdown("**板块/市值**")
     cols[6].markdown("**行业/PE**")
-    cols[7].markdown("**资金(融/北)**")
+    cols[7].markdown("**资金(融/北/主)**")
     cols[8].markdown("**资金/流通市值%**")
     cols[9].markdown("**资金/总市值%**")
     cols[10].markdown("**操作**")
@@ -181,12 +181,14 @@ def render_buy_list(df, unique_key, user_id):
         pe_str = _fmt_pe_colored(pe)
         c[6].markdown(f"{ind} | {pe_str}")
 
-        # Financing & Northbound
+        # Financing, Northbound & Main fund flow
         fin_val = row.get('Financing Net', 0)
         nb_val = row.get('NB Inflow', 0)
+        main_val = row.get('Main Inflow', 0)
         fin_str = _fmt_colored_signed("融:", fin_val, "万")
         nb_str = _fmt_colored_signed("北:", nb_val, "万")
-        c[7].markdown(f"{fin_str} | {nb_str}")
+        main_str = _fmt_colored_signed("主:", main_val, "万")
+        c[7].markdown(f"{fin_str} | {nb_str} | {main_str}")
 
         fin_pct = row.get('Fin/MV%', 0)
         nb_pct = row.get('NB/MV%', 0)
@@ -343,9 +345,10 @@ if page == "市场概览":
     daily_date = max_dates.get("daily_market") or last_date
     margin_date = max_dates.get("margin_data") or "-"
     nb_date = max_dates.get("northbound_data") or "-"
+    main_date = max_dates.get("main_fund_flow") or "-"
 
     st.markdown(
-        f"**📅 分析日期(行情)**: {daily_date} | **融数据**: {margin_date} | **北向数据**: {nb_date} "
+        f"**📅 分析日期(行情)**: {daily_date} | **融数据**: {margin_date} | **北向数据**: {nb_date} | **主力数据**: {main_date} "
         f"| **🌡️ 大盘**: {sentiment} (📈{up} : 📉{down})"
     )
     if nb_date != "-" and daily_date and nb_date != daily_date:
