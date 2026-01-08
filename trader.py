@@ -8,6 +8,11 @@ DB_PATH = db.SQLITE_DB_PATH
 def get_db_connection():
     return db.get_db_connection()
 
+def _now_beijing_str() -> str:
+    # Beijing time is UTC+8 (no DST). Use UTC offset to avoid tzdata availability issues.
+    bj_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    return bj_now.strftime("%Y-%m-%d %H:%M:%S")
+
 def init_trade_system(initial_capital=100000.0, users=None, reset=False):
     """
     Initializes the trading tables for Multi-User.
@@ -188,11 +193,11 @@ def execute_trade(user_id, action, code, name, price, quantity):
         cursor.execute("UPDATE trade_account SET cash=? WHERE user_id=?", (new_cash, user_id))
         
         # Log Order
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_str = _now_beijing_str()
         cursor.execute('''
-            INSERT INTO trade_orders (user_id, trade_date, code, name, action, price, quantity, amount, commission, balance_after)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, date_str, code, name, action, price, quantity, amount, commission, new_cash))
+            INSERT INTO trade_orders (user_id, trade_date, code, name, action, price, quantity, amount, commission, balance_after, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, date_str, code, name, action, price, quantity, amount, commission, new_cash, date_str))
         
         conn.commit()
         return True, f"交易成功! {action} {quantity}股"
