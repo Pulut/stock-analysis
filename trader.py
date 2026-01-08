@@ -1,6 +1,5 @@
 import pandas as pd
 import datetime
-import akshare as ak
 import db
 
 DB_PATH = db.SQLITE_DB_PATH
@@ -91,8 +90,12 @@ def init_trade_system(initial_capital=100000.0, users=None, reset=False):
     conn.close()
     print(f"多用户交易系统初始化完成！用户: {users}, 初始资金: {initial_capital}, reset={reset}")
 
-def get_account_info(user_id):
-    """Returns cash, total assets, and positions for a SPECIFIC user."""
+def get_account_info(user_id, price_lookup=None):
+    """Returns cash, total assets, and positions for a SPECIFIC user.
+
+    price_lookup: optional dict mapping code(str)->price(float) so we can value
+    positions without making network calls.
+    """
     conn = get_db_connection()
     try:
         cursor = db.get_cursor(conn)
@@ -101,7 +104,7 @@ def get_account_info(user_id):
         res = cursor.fetchone()
         if not res:
             return 0, 0, pd.DataFrame()
-        cash = res[0]
+        cash = float(res[0] or 0.0)
         
         # Get Positions
         positions = pd.read_sql(f"SELECT * FROM trade_positions WHERE user_id='{user_id}'", conn)
@@ -109,21 +112,24 @@ def get_account_info(user_id):
         market_val = 0.0
         
         if not positions.empty:
-            # Fetch prices
-            try:
-                df = ak.stock_zh_a_spot_em()
-                for idx, row in positions.iterrows():
-                    match = df[df['代码'] == row['code']]
-                    price = float(match.iloc[0]['最新价']) if not match.empty else row['avg_cost']
-                    
-                    positions.at[idx, 'current_price'] = price
-                    positions.at[idx, 'market_value'] = price * row['quantity']
-                    positions.at[idx, 'profit'] = (price - row['avg_cost']) * row['quantity']
-                    positions.at[idx, 'profit_pct'] = (price - row['avg_cost']) / row['avg_cost'] * 100
-                    
-                    market_val += price * row['quantity']
-            except:
-                pass
+            positions["code"] = positions["code"].astype(str).str.zfill(6)
+            qty = pd.to_numeric(positions.get("quantity"), errors="coerce").fillna(0.0)
+            avg_cost = pd.to_numeric(positions.get("avg_cost"), errors="coerce").fillna(0.0)
+
+            if price_lookup:
+                prices = positions["code"].map(lambda c: price_lookup.get(c))
+                prices = pd.to_numeric(prices, errors="coerce").fillna(avg_cost)
+            else:
+                prices = avg_cost.copy()
+
+            positions["current_price"] = prices
+            positions["market_value"] = prices * qty
+            positions["profit"] = (prices - avg_cost) * qty
+            positions["profit_pct"] = 0.0
+            mask = avg_cost > 0
+            positions.loc[mask, "profit_pct"] = (prices[mask] - avg_cost[mask]) / avg_cost[mask] * 100.0
+
+            market_val = float(positions["market_value"].sum() or 0.0)
         
         total_assets = cash + market_val
         

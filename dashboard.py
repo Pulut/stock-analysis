@@ -388,15 +388,35 @@ with st.sidebar.container():
     
     t_price = 0
     t_name = ""
-    if len(trade_code) == 6:
+    if len(trade_code) == 6 and trade_code.isdigit():
+        conn = None
         try:
-             spot = ak.stock_zh_a_spot_em()
-             r = spot[spot['代码'] == trade_code]
-             if not r.empty:
-                 t_price = float(r.iloc[0]['最新价'])
-                 t_name = r.iloc[0]['名称']
-                 st.sidebar.info(f"{t_name} : {t_price}")
-        except: pass
+            conn = get_db_connection()
+            cursor = db.get_cursor(conn)
+
+            cursor.execute("SELECT name FROM stock_basic WHERE code=?", (trade_code,))
+            res = cursor.fetchone()
+            if res and res[0]:
+                t_name = str(res[0])
+            else:
+                t_name = trade_code
+
+            cursor.execute(
+                "SELECT close FROM daily_market WHERE code=? ORDER BY trade_date DESC LIMIT 1",
+                (trade_code,),
+            )
+            res = cursor.fetchone()
+            if res and res[0] is not None:
+                t_price = float(res[0])
+                st.sidebar.info(f"{t_name} : {t_price:.2f} (收盘价)")
+        except Exception:
+            pass
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
         
     c1, c2 = st.sidebar.columns(2)
     if c1.button("买入"):
@@ -525,7 +545,15 @@ elif page == "💼 我的持仓":
     st.title(f"💼 我的模拟持仓 ({current_user})")
     
     try:
-        cash, total, pos = trader.get_account_info(current_user)
+        price_lookup = None
+        try:
+            codes = report_df["Code"].astype(str).str.zfill(6)
+            prices = pd.to_numeric(report_df.get("Real_Price"), errors="coerce")
+            price_lookup = dict(zip(codes, prices))
+        except Exception:
+            price_lookup = None
+
+        cash, total, pos = trader.get_account_info(current_user, price_lookup=price_lookup)
     except:
         st.error("账户未初始化")
         st.stop()
