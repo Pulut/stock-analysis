@@ -1,13 +1,9 @@
 import pandas as pd
-import sqlite3
 import datetime
-
-DB_PATH = "stock_data.db"
+import db
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    return db.get_db_connection()
 
 def get_latest_common_trade_date(conn):
     """

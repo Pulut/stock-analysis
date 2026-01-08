@@ -21,6 +21,7 @@ streamlit_err.log
 *.db-journal
 *.db-shm
 *.db-wal
+*.db
 
 # 调试脚本与启动器
 launcher.vbs
@@ -30,3 +31,7 @@ run_data_loader_and_push.bat
 
 # Streamlit 配置 (如果是包含私密信息的 .streamlit/secrets.toml)
 # .streamlit/config.toml 通常可以上传
+.streamlit/secrets.toml
+
+# Local env files
+.env

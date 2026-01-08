@@ -3,3 +3,4 @@ pandas
 akshare
 plotly
 tqdm
+psycopg2-binary

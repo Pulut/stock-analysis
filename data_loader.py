@@ -1,17 +1,13 @@
 import akshare as ak
 import pandas as pd
-import sqlite3
 import time
 import random
 import datetime
 from tqdm import tqdm
-
-DB_PATH = "stock_data.db"
+import db
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    return db.get_db_connection()
 
 def init_stock_list():
     """
@@ -27,7 +23,7 @@ def init_stock_list():
         all_stocks = stock_df[stock_df['代码'].str.startswith(('60', '68', '00', '30'))].copy()
         
         conn = get_db_connection()
-        cursor = conn.cursor()
+        cursor = db.get_cursor(conn)
 
         # Re-create table with new columns
         cursor.execute("DROP TABLE IF EXISTS stock_basic")
@@ -113,7 +109,7 @@ def download_daily_data(stock_codes, default_start_date="20250101"):
     Margin (SSE/SZSE) and Northbound are handled in separate steps.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
     
     total = len(stock_codes)
     print(f"Starting OHLCV update for {total} stocks...")
@@ -131,7 +127,12 @@ def download_daily_data(stock_codes, default_start_date="20250101"):
             daily_start_date = None
             last_market_date_str = latest_market_dates.get(code)
             if last_market_date_str:
-                last_market_date = datetime.datetime.strptime(last_market_date_str, "%Y-%m-%d")
+                if isinstance(last_market_date_str, datetime.datetime):
+                    last_market_date = last_market_date_str
+                elif isinstance(last_market_date_str, datetime.date):
+                    last_market_date = datetime.datetime.combine(last_market_date_str, datetime.time.min)
+                else:
+                    last_market_date = datetime.datetime.strptime(str(last_market_date_str), "%Y-%m-%d")
                 next_day = last_market_date + datetime.timedelta(days=1)
                 if next_day <= now:
                     daily_start_date = next_day.strftime("%Y%m%d")
@@ -159,10 +160,20 @@ def download_daily_data(stock_codes, default_start_date="20250101"):
                             row['成交量'], row['换手率']
                         ))
                     
-                    cursor.executemany('''
-                        INSERT OR REPLACE INTO daily_market (code, trade_date, open, high, low, close, volume, turnover_rate)
+                    cursor.executemany(
+                        '''
+                        INSERT INTO daily_market (code, trade_date, open, high, low, close, volume, turnover_rate)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', daily_records)
+                        ON CONFLICT(code, trade_date) DO UPDATE SET
+                            open=excluded.open,
+                            high=excluded.high,
+                            low=excluded.low,
+                            close=excluded.close,
+                            volume=excluded.volume,
+                            turnover_rate=excluded.turnover_rate
+                        ''',
+                        daily_records,
+                    )
 
             conn.commit()
             
@@ -182,7 +193,7 @@ def download_sse_margin_data(start_date="20250101"):
     """
     print(f"Starting SSE Margin Data download (incremental, default start={start_date})...")
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
 
     # Determine target end date from daily_market to align calendars
     cursor.execute("SELECT MAX(trade_date) FROM daily_market")
@@ -220,7 +231,7 @@ def download_sse_margin_data(start_date="20250101"):
         return
 
     for trade_date in trade_dates:
-        date_str = trade_date.replace("-", "")
+        date_str = str(trade_date).replace("-", "")
         try:
             margin_df = ak.stock_margin_detail_sse(date=date_str)
         except Exception as e:
@@ -246,9 +257,15 @@ def download_sse_margin_data(start_date="20250101"):
 
         cursor.executemany(
             """
-            INSERT OR REPLACE INTO margin_data
+            INSERT INTO margin_data
             (code, trade_date, financing_buy, financing_balance, securities_sell, securities_balance, net_financing_buy)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+                financing_buy=excluded.financing_buy,
+                financing_balance=excluded.financing_balance,
+                securities_sell=excluded.securities_sell,
+                securities_balance=excluded.securities_balance,
+                net_financing_buy=excluded.net_financing_buy
             """,
             records,
         )
@@ -265,7 +282,7 @@ def download_szse_margin_data(start_date="20250101"):
     """
     print(f"Starting SZSE Margin Data download (incremental, default start={start_date})...")
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
     
     # Determine target end date from daily_market to align calendars
     cursor.execute("SELECT MAX(trade_date) FROM daily_market")
@@ -317,7 +334,7 @@ def download_szse_margin_data(start_date="20250101"):
         return
 
     for trade_date in trade_dates:
-        date_str = trade_date.replace("-", "")
+        date_str = str(trade_date).replace("-", "")
         margin_df = None
         for attempt in range(1, 4):
             try:
@@ -353,9 +370,15 @@ def download_szse_margin_data(start_date="20250101"):
 
         cursor.executemany(
             """
-            INSERT OR REPLACE INTO margin_data
+            INSERT INTO margin_data
             (code, trade_date, financing_buy, financing_balance, securities_sell, securities_balance, net_financing_buy)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+                financing_buy=excluded.financing_buy,
+                financing_balance=excluded.financing_balance,
+                securities_sell=excluded.securities_sell,
+                securities_balance=excluded.securities_balance,
+                net_financing_buy=excluded.net_financing_buy
             """,
             records,
         )
@@ -370,7 +393,7 @@ def download_northbound_data(start_date="20250101"):
     Step 3: Download Northbound (沪股通/深股通) holding data.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
     
     print(f"Starting Northbound (holdings) data download (incremental, default start={start_date})...")
 
@@ -410,9 +433,14 @@ def download_northbound_data(start_date="20250101"):
         return
 
     for trade_date in trade_dates:
-        date_str = trade_date.replace("-", "")
+        date_str = str(trade_date).replace("-", "")
         try:
-            target_dt = datetime.datetime.strptime(trade_date, "%Y-%m-%d").date()
+            if isinstance(trade_date, datetime.datetime):
+                target_dt = trade_date.date()
+            elif isinstance(trade_date, datetime.date):
+                target_dt = trade_date
+            else:
+                target_dt = datetime.datetime.strptime(str(trade_date), "%Y-%m-%d").date()
         except Exception:
             print(f"[Northbound] Invalid trade_date: {trade_date}")
             continue
@@ -480,7 +508,12 @@ def download_northbound_data(start_date="20250101"):
 
         cursor.execute("DELETE FROM northbound_data WHERE trade_date = ?", (trade_date,))
         cursor.executemany(
-            "INSERT OR REPLACE INTO northbound_data (code, trade_date, net_inflow) VALUES (?, ?, ?)",
+            """
+            INSERT INTO northbound_data (code, trade_date, net_inflow)
+            VALUES (?, ?, ?)
+            ON CONFLICT(code, trade_date) DO UPDATE SET
+                net_inflow=excluded.net_inflow
+            """,
             records,
         )
         conn.commit()
@@ -498,7 +531,7 @@ def download_main_fund_flow_data():
     trading day available in daily_market.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
 
     print("Starting Main Fund Flow (主力净流入) data download...")
 
@@ -556,7 +589,12 @@ def download_main_fund_flow_data():
 
     cursor.execute("DELETE FROM main_fund_flow WHERE trade_date = ?", (trade_date,))
     cursor.executemany(
-        "INSERT OR REPLACE INTO main_fund_flow (code, trade_date, main_net_inflow) VALUES (?, ?, ?)",
+        """
+        INSERT INTO main_fund_flow (code, trade_date, main_net_inflow)
+        VALUES (?, ?, ?)
+        ON CONFLICT(code, trade_date) DO UPDATE SET
+            main_net_inflow=excluded.main_net_inflow
+        """,
         records,
     )
     conn.commit()
@@ -566,8 +604,22 @@ def download_main_fund_flow_data():
 def init_tables():
     """Ensure all data tables exist."""
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
     
+    # Basic stock info (required by analyzer/dashboard)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS stock_basic (
+            code TEXT PRIMARY KEY,
+            name TEXT,
+            sector TEXT,
+            industry TEXT,
+            float_mv REAL,
+            total_mv REAL,
+            pe_ttm REAL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_market (
             code TEXT,
@@ -612,6 +664,12 @@ def init_tables():
             PRIMARY KEY (code, trade_date)
         )
     ''')
+
+    # Helpful indexes for range queries by trade_date
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_market_trade_date ON daily_market(trade_date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_margin_data_trade_date ON margin_data(trade_date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_northbound_data_trade_date ON northbound_data(trade_date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_main_fund_flow_trade_date ON main_fund_flow(trade_date)")
     conn.commit()
     conn.close()
 

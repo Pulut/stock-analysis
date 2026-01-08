@@ -1,32 +1,35 @@
-import sqlite3
 import pandas as pd
 import datetime
 import akshare as ak
+import db
 
-DB_PATH = "stock_data.db"
+DB_PATH = db.SQLITE_DB_PATH
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    # Enable WAL mode for better concurrency (Writer doesn't block Readers)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    return db.get_db_connection()
 
-def init_trade_system(initial_capital=100000.0):
+def init_trade_system(initial_capital=100000.0, users=None, reset=False):
     """
     Initializes the trading tables for Multi-User.
-    WARNING: Drops existing trade tables to apply schema changes.
+
+    NOTE: In Streamlit, scripts rerun frequently (e.g., clicking a button). This
+    function is non-destructive by default and will only create missing tables.
+
+    Set reset=True to drop and recreate trade tables (destructive).
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
+    backend = db.get_backend()
     
-    # Drop old tables if exist to ensure schema update
-    cursor.execute("DROP TABLE IF EXISTS trade_account")
-    cursor.execute("DROP TABLE IF EXISTS trade_positions")
-    cursor.execute("DROP TABLE IF EXISTS trade_orders")
+    if reset:
+        # Drop old tables if exist to ensure schema update (destructive)
+        cursor.execute("DROP TABLE IF EXISTS trade_account")
+        cursor.execute("DROP TABLE IF EXISTS trade_positions")
+        cursor.execute("DROP TABLE IF EXISTS trade_orders")
     
     # 1. Account Table (Cash) - Key: user_id
     cursor.execute('''
-        CREATE TABLE trade_account (
+        CREATE TABLE IF NOT EXISTS trade_account (
             user_id TEXT PRIMARY KEY,
             cash REAL,
             total_assets REAL,
@@ -36,7 +39,7 @@ def init_trade_system(initial_capital=100000.0):
     
     # 2. Positions Table - Key: (user_id, code)
     cursor.execute('''
-        CREATE TABLE trade_positions (
+        CREATE TABLE IF NOT EXISTS trade_positions (
             user_id TEXT,
             code TEXT,
             name TEXT,
@@ -48,9 +51,10 @@ def init_trade_system(initial_capital=100000.0):
     ''')
     
     # 3. Order History
-    cursor.execute('''
-        CREATE TABLE trade_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id_ddl = "id BIGSERIAL PRIMARY KEY" if backend == "postgres" else "id INTEGER PRIMARY KEY AUTOINCREMENT"
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS trade_orders (
+            {order_id_ddl},
             user_id TEXT,
             trade_date TEXT,
             code TEXT,
@@ -65,23 +69,33 @@ def init_trade_system(initial_capital=100000.0):
         )
     ''')
     
-    # Initialize Accounts for user1 and user2
-    users = ['user1', 'user2']
+    # Initialize Accounts for user1 and user2 (or passed-in users)
+    if users is None:
+        users = ['user1', 'user2']
     for u in users:
-        cursor.execute("INSERT OR IGNORE INTO trade_account (user_id, cash, total_assets) VALUES (?, ?, ?)", 
-                       (u, initial_capital, initial_capital))
+        cursor.execute(
+            """
+            INSERT INTO trade_account (user_id, cash, total_assets)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (u, initial_capital, initial_capital),
+        )
         
     conn.commit()
     conn.close()
-    print(f"多用户交易系统初始化完成！用户: {users}, 初始资金: {initial_capital}")
+    print(f"多用户交易系统初始化完成！用户: {users}, 初始资金: {initial_capital}, reset={reset}")
 
 def get_account_info(user_id):
     """Returns cash, total assets, and positions for a SPECIFIC user."""
     conn = get_db_connection()
     try:
+        cursor = db.get_cursor(conn)
         # Get Cash
-        res = conn.execute("SELECT cash FROM trade_account WHERE user_id=?", (user_id,)).fetchone()
-        if not res: return 0, 0, pd.DataFrame()
+        cursor.execute("SELECT cash FROM trade_account WHERE user_id=?", (user_id,))
+        res = cursor.fetchone()
+        if not res:
+            return 0, 0, pd.DataFrame()
         cash = res[0]
         
         # Get Positions
@@ -109,7 +123,7 @@ def get_account_info(user_id):
         total_assets = cash + market_val
         
         # Update DB
-        conn.execute("UPDATE trade_account SET total_assets = ? WHERE user_id=?", (total_assets, user_id))
+        cursor.execute("UPDATE trade_account SET total_assets = ? WHERE user_id=?", (total_assets, user_id))
         conn.commit()
         
         return cash, total_assets, positions
@@ -121,7 +135,7 @@ def execute_trade(user_id, action, code, name, price, quantity):
     Executes a trade for a SPECIFIC user.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = db.get_cursor(conn)
     
     try:
         # Get current cash
@@ -190,4 +204,3 @@ def execute_trade(user_id, action, code, name, price, quantity):
 
 if __name__ == "__main__":
     init_trade_system()
-

@@ -5,6 +5,7 @@ from plotly.subplots import make_subplots
 import analyzer
 import sqlite3
 import akshare as ak
+import db
 import trader 
 import threading
 import time
@@ -272,6 +273,28 @@ st.sidebar.title("🚀 A股资金流向分析")
 
 # User Selection
 current_user = st.sidebar.selectbox("👤 当前用户", ["user1", "user2"])
+
+with st.sidebar.expander("🗄️ 数据库状态", expanded=False):
+    backend = db.get_backend()
+    st.write(f"Backend: `{backend}`")
+    run_check = st.checkbox("检查连接/行数", value=False, key="db_check")
+    if run_check:
+        try:
+            conn = db.get_db_connection()
+            cursor = db.get_cursor(conn)
+            cursor.execute("SELECT COUNT(1) FROM trade_orders")
+            orders_cnt = int(cursor.fetchone()[0] or 0)
+            cursor.execute("SELECT COUNT(1) FROM trade_positions")
+            pos_cnt = int(cursor.fetchone()[0] or 0)
+            st.write(f"`trade_orders` rows: {orders_cnt}")
+            st.write(f"`trade_positions` rows: {pos_cnt}")
+        except Exception as exc:
+            st.error(f"DB check failed: {exc}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
