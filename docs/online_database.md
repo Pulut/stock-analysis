@@ -34,19 +34,13 @@ DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require"
 
 ## 3) 初始化/增量更新数据
 
-只建表（不抓取 AkShare 数据）：
-
-```bash
-python scripts/init_supabase_schema.py
-```
-
-初始化并执行一次数据更新：
+配置好 `DATABASE_URL` 后，直接执行一次数据更新：
 
 ```bash
 python data_loader.py
 ```
 
-脚本会 `CREATE TABLE IF NOT EXISTS` 并按增量逻辑更新当天数据。
+首次运行会自动创建所需表；之后每天运行会按增量逻辑更新数据。
 
 ## 4) 交易数据持久化
 
@@ -65,21 +59,7 @@ trader.init_trade_system(reset=True)
 
 一个常用办法是使用 `pgloader`（可用 Docker 跑）：
 
-### 方案 A：纯 Python 导入（Windows 友好）
-
-> 适合不能/不想装 Docker 的情况。会分表分批 `COPY`，耗时取决于网速与免费档性能。
-
-```bash
-python scripts/import_sqlite_to_postgres.py --sqlite-path stock_data.db
-```
-
-如果目标表已经有数据，想覆盖导入：
-
-```bash
-python scripts/import_sqlite_to_postgres.py --sqlite-path stock_data.db --truncate
-```
-
-### 方案 B：pgloader（最快）
+### 方案：pgloader（最快）
 
 ```bash
 pgloader stock_data.db "postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require"

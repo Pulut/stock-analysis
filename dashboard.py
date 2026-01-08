@@ -103,6 +103,104 @@ def get_stock_history(code):
 def get_db_connection():
     return analyzer.get_db_connection()
 
+# --- Northbound (Top10 Deal) helpers ---
+def load_northbound_top10_deal(conn):
+    """
+    Load latest Northbound Top 10 deal list from DB.
+
+    Table: northbound_top10_deal (filled by data_loader.py).
+    """
+    try:
+        max_date = pd.read_sql("SELECT MAX(trade_date) AS max_date FROM northbound_top10_deal", conn).iloc[0, 0]
+    except Exception:
+        return pd.DataFrame(), None
+
+    if not max_date:
+        return pd.DataFrame(), None
+
+    try:
+        df = pd.read_sql(
+            f"SELECT code, mutual_type, rank, deal_amt FROM northbound_top10_deal WHERE trade_date = '{max_date}'",
+            conn,
+        )
+    except Exception:
+        return pd.DataFrame(), max_date
+
+    if df is None or df.empty:
+        return pd.DataFrame(), max_date
+
+    df["Code"] = df["code"].astype(str).str.zfill(6)
+    df["deal_amt"] = pd.to_numeric(df["deal_amt"], errors="coerce")
+    df["rank"] = pd.to_numeric(df["rank"], errors="coerce").fillna(0).astype(int)
+    df = df.sort_values(["deal_amt", "rank"], ascending=[False, True]).head(10)
+    return df[["Code", "mutual_type", "rank", "deal_amt"]], max_date
+
+
+def render_northbound_deal_list(df, unique_key, user_id):
+    """Render Northbound Top 10 deal list with Buy buttons."""
+
+    def _fmt_deal_yi(v):
+        try:
+            v = float(v)
+        except Exception:
+            return "-"
+        return f"{v/100000000:.2f}亿"
+
+    def _fmt_chg(v):
+        try:
+            v = float(v)
+        except Exception:
+            return "-"
+        color = "red" if v > 0 else "green"
+        return f":{color}[{v:.2f}%]"
+
+    def _mt_label(mt):
+        if mt == "001":
+            return "沪"
+        if mt == "003":
+            return "深"
+        return str(mt or "-")
+
+    cols = st.columns([0.8, 1.2, 1.0, 0.9, 0.8, 0.8])
+    cols[0].markdown("**代码**")
+    cols[1].markdown("**名称**")
+    cols[2].markdown("**北向成交额**")
+    cols[3].markdown("**现价**")
+    cols[4].markdown("**涨跌**")
+    cols[5].markdown("**操作**")
+    st.markdown("---")
+
+    for _, row in df.iterrows():
+        c = st.columns([0.8, 1.2, 1.0, 0.9, 0.8, 0.8])
+        code = row.get("Code", "")
+        name = row.get("Name", "-")
+        mt = _mt_label(row.get("mutual_type"))
+        rank = row.get("rank", "")
+        c[0].write(code)
+        c[1].write(f"{name} ({mt}{rank})")
+        c[2].write(_fmt_deal_yi(row.get("deal_amt")))
+
+        price = row.get("Real_Price", row.get("Close", 0))
+        try:
+            c[3].write(f"{float(price):.2f}")
+        except Exception:
+            c[3].write("-")
+        c[4].markdown(_fmt_chg(row.get("Real_Chg_Pct", 0)))
+
+        if c[5].button("🛒 买", key=f"btn_buy_northdeal_{unique_key}_{user_id}_{code}"):
+            try:
+                price = float(price)
+            except Exception:
+                price = 0
+            if price > 0:
+                succ, msg = trader.execute_trade(user_id, 'BUY', code, name, price, 100)
+                if succ:
+                    st.toast(f"✅ {msg}")
+                else:
+                    st.toast(f"❌ {msg}")
+            else:
+                st.toast("⚠️ 无法获取价格")
+
 # --- Custom Table Renderers with Buttons ---
 def render_buy_list(df, unique_key, user_id):
     """Renders a detailed list of stocks with 'Buy' buttons."""
@@ -274,28 +372,6 @@ st.sidebar.title("🚀 A股资金流向分析")
 # User Selection
 current_user = st.sidebar.selectbox("👤 当前用户", ["user1", "user2"])
 
-with st.sidebar.expander("🗄️ 数据库状态", expanded=False):
-    backend = db.get_backend()
-    st.write(f"Backend: `{backend}`")
-    run_check = st.checkbox("检查连接/行数", value=False, key="db_check")
-    if run_check:
-        try:
-            conn = db.get_db_connection()
-            cursor = db.get_cursor(conn)
-            cursor.execute("SELECT COUNT(1) FROM trade_orders")
-            orders_cnt = int(cursor.fetchone()[0] or 0)
-            cursor.execute("SELECT COUNT(1) FROM trade_positions")
-            pos_cnt = int(cursor.fetchone()[0] or 0)
-            st.write(f"`trade_orders` rows: {orders_cnt}")
-            st.write(f"`trade_positions` rows: {pos_cnt}")
-        except Exception as exc:
-            st.error(f"DB check failed: {exc}")
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
 if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
     st.rerun()
@@ -363,19 +439,21 @@ if page == "市场概览":
     conn = get_db_connection()
     sentiment, up, down, last_date = analyzer.get_market_sentiment(conn)
     max_dates = analyzer.get_table_max_dates(conn)
+    nb_top10_df, nb_deal_date = load_northbound_top10_deal(conn)
     conn.close()
     
     daily_date = max_dates.get("daily_market") or last_date
     margin_date = max_dates.get("margin_data") or "-"
     nb_date = max_dates.get("northbound_data") or "-"
     main_date = max_dates.get("main_fund_flow") or "-"
+    nb_date = nb_deal_date or "-"
 
     st.markdown(
-        f"**📅 分析日期(行情)**: {daily_date} | **融数据**: {margin_date} | **北向数据**: {nb_date} | **主力数据**: {main_date} "
+        f"**📅 分析日期(行情)**: {daily_date} | **融数据**: {margin_date} | **北向成交**: {nb_date} | **主力数据**: {main_date} "
         f"| **🌡️ 大盘**: {sentiment} (📈{up} : 📉{down})"
     )
     if nb_date != "-" and daily_date and nb_date != daily_date:
-        st.caption(f"北向数据尚未更新到 {daily_date}，北向相关榜单/指标截至 {nb_date}")
+        st.caption(f"北向成交数据尚未更新到 {daily_date}，北向榜单截至 {nb_date}")
     st.progress(up/(up+down) if (up+down)>0 else 0)
     st.markdown("---")
     
@@ -385,9 +463,15 @@ if page == "市场概览":
     
     st.markdown("---")
     
-    st.subheader(f"💰 北向资金扫货榜 (Top 10, 截至 {nb_date})")
-    top_north = report_df.sort_values(by="NB Inflow", ascending=False).head(10)
-    render_buy_list(top_north, "north", current_user)
+    st.subheader(f"💰 北向十大成交榜 (Top 10, 截至 {nb_date})")
+    if nb_top10_df is None or nb_top10_df.empty:
+        st.caption("暂无北向十大成交数据，请先运行 data_loader.py")
+    else:
+        merged = pd.merge(nb_top10_df, report_df, on="Code", how="left")
+        if "Name" not in merged.columns:
+            merged["Name"] = merged["Code"]
+        merged = merged.sort_values(["deal_amt", "rank"], ascending=[False, True]).head(10)
+        render_northbound_deal_list(merged, "north_deal", current_user)
 
     st.markdown("---")
 

@@ -5,6 +5,7 @@ import random
 import datetime
 from tqdm import tqdm
 import db
+import requests
 
 def get_db_connection():
     return db.get_db_connection()
@@ -522,6 +523,156 @@ def download_northbound_data(start_date="20250101"):
     conn.close()
     print("Northbound data download complete.")
 
+def download_northbound_top10_deal_data(start_date="20250101"):
+    """
+    Step 4: Download Northbound Top 10 deal (十大成交) data.
+
+    Data source: Eastmoney datacenter (report: RPT_MUTUAL_TOP10DEAL).
+    Note: Recent dates do not provide NET_BUY_AMT for 沪股通/深股通, but DEAL_AMT is available.
+    """
+    conn = get_db_connection()
+    cursor = db.get_cursor(conn)
+
+    print(f"Starting Northbound Top10 Deal download (incremental, default start={start_date})...")
+
+    # Align to daily_market trading calendar
+    cursor.execute("SELECT MAX(trade_date) FROM daily_market")
+    end_date_db = cursor.fetchone()[0]
+    if not end_date_db:
+        conn.close()
+        print("[NorthTop10] No daily_market data; skip.")
+        return
+
+    cursor.execute("SELECT MAX(trade_date) FROM northbound_top10_deal")
+    last_date_db = cursor.fetchone()[0]
+
+    if last_date_db:
+        cursor.execute(
+            "SELECT trade_date FROM daily_market "
+            "WHERE trade_date > ? AND trade_date <= ? "
+            "GROUP BY trade_date ORDER BY trade_date",
+            (last_date_db, end_date_db),
+        )
+    else:
+        start_date_db = "-".join([start_date[:4], start_date[4:6], start_date[6:]])
+        cursor.execute(
+            "SELECT trade_date FROM daily_market "
+            "WHERE trade_date >= ? AND trade_date <= ? "
+            "GROUP BY trade_date ORDER BY trade_date",
+            (start_date_db, end_date_db),
+        )
+
+    trade_dates = [r[0] for r in cursor.fetchall()]
+    if not trade_dates:
+        conn.close()
+        print("[NorthTop10] Up to date.")
+        return
+
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    mutual_types = ["001", "003"]  # 沪股通 / 深股通
+
+    for trade_date in trade_dates:
+        # Format TRADE_DATE filter as 'YYYY-MM-DD 00:00:00'
+        try:
+            if isinstance(trade_date, datetime.datetime):
+                date_str = trade_date.date().strftime("%Y-%m-%d")
+            elif isinstance(trade_date, datetime.date):
+                date_str = trade_date.strftime("%Y-%m-%d")
+            else:
+                date_str = str(trade_date)
+        except Exception:
+            print(f"[NorthTop10] Invalid trade_date: {trade_date}")
+            continue
+
+        ts = f"{date_str} 00:00:00"
+        rows = []
+
+        for mt in mutual_types:
+            params = {
+                "reportName": "RPT_MUTUAL_TOP10DEAL",
+                "columns": "ALL",
+                "pageNumber": 1,
+                "pageSize": 10,
+                "sortColumns": "RANK",
+                "sortTypes": 1,
+                "source": "WEB",
+                "client": "WEB",
+                "filter": f"(MUTUAL_TYPE=\"{mt}\")(TRADE_DATE='{ts}')",
+            }
+
+            data = None
+            for attempt in range(1, 4):
+                try:
+                    resp = requests.get(url, params=params, timeout=20)
+                    data = resp.json()
+                    break
+                except Exception as e:
+                    if attempt >= 3:
+                        print(f"[NorthTop10] Error fetching mt={mt} {date_str}: {e}")
+                    else:
+                        wait_s = (2 ** (attempt - 1)) + random.random() * 0.5
+                        print(f"[NorthTop10] Error fetching mt={mt} {date_str} (attempt {attempt}/3): {e}; retry in {wait_s:.1f}s")
+                        time.sleep(wait_s)
+
+            if not data or not data.get("success"):
+                continue
+
+            result = data.get("result") or {}
+            for item in (result.get("data") or []):
+                code = str(item.get("SECURITY_CODE") or "").zfill(6)
+                if not code or code == "000000":
+                    continue
+                try:
+                    rank = int(item.get("RANK") or 0)
+                except Exception:
+                    rank = 0
+
+                def _to_float(v):
+                    try:
+                        if v is None or v == "":
+                            return None
+                        return float(v)
+                    except Exception:
+                        return None
+
+                rows.append(
+                    (
+                        code,
+                        trade_date,
+                        mt,
+                        rank,
+                        _to_float(item.get("DEAL_AMT")),
+                        _to_float(item.get("NET_BUY_AMT")),
+                        _to_float(item.get("BUY_AMT")),
+                        _to_float(item.get("SELL_AMT")),
+                    )
+                )
+
+        if not rows:
+            print(f"[NorthTop10] No data for {trade_date}")
+            continue
+
+        cursor.execute("DELETE FROM northbound_top10_deal WHERE trade_date = ?", (trade_date,))
+        cursor.executemany(
+            """
+            INSERT INTO northbound_top10_deal
+            (code, trade_date, mutual_type, rank, deal_amt, net_buy_amt, buy_amt, sell_amt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, trade_date, mutual_type) DO UPDATE SET
+                rank=excluded.rank,
+                deal_amt=excluded.deal_amt,
+                net_buy_amt=excluded.net_buy_amt,
+                buy_amt=excluded.buy_amt,
+                sell_amt=excluded.sell_amt
+            """,
+            rows,
+        )
+        conn.commit()
+        print(f"[NorthTop10] Updated {len(rows)} rows for {trade_date}")
+
+    conn.close()
+    print("Northbound Top10 Deal download complete.")
+
 def download_main_fund_flow_data():
     """
     Step 5: Download Main Force Net Inflow (主力净流入).
@@ -665,11 +816,27 @@ def init_tables():
         )
     ''')
 
+    # Northbound top 10 deal (十大成交) - used for dashboard display
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS northbound_top10_deal (
+            code TEXT,
+            trade_date DATE,
+            mutual_type TEXT,
+            rank INTEGER,
+            deal_amt REAL,
+            net_buy_amt REAL,
+            buy_amt REAL,
+            sell_amt REAL,
+            PRIMARY KEY (code, trade_date, mutual_type)
+        )
+    ''')
+
     # Helpful indexes for range queries by trade_date
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_market_trade_date ON daily_market(trade_date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_margin_data_trade_date ON margin_data(trade_date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_northbound_data_trade_date ON northbound_data(trade_date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_main_fund_flow_trade_date ON main_fund_flow(trade_date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_northbound_top10_trade_date ON northbound_top10_deal(trade_date)")
     conn.commit()
     conn.close()
 
@@ -688,6 +855,9 @@ if __name__ == "__main__":
     
     # 4. Northbound
     download_northbound_data(start_date="20250101")
+
+    # 4.5 Northbound Top10 Deal (十大成交)
+    download_northbound_top10_deal_data(start_date="20250101")
 
     # 5. Main Fund Flow (主力净流入)
     download_main_fund_flow_data()
