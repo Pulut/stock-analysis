@@ -174,8 +174,175 @@ def generate_signals_row(row, info):
     # [Trend] Simple Trend Up (No significant fund resonance)
     if close > ma20:
         return "📈 趋势向上"
-         
+     
     return "⚪️ 中性"
+
+def get_signals_for_codes(conn, codes, lookback_days: int = 60):
+    """
+    Return latest Signal for a subset of codes (used by Portfolio page).
+
+    This avoids loading the full-market analysis report just to compute signals for a
+    small holdings list.
+    """
+    if not codes:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    cleaned = []
+    for c in codes:
+        if c is None:
+            continue
+        s = str(c).strip()
+        if not s:
+            continue
+        if s.isdigit():
+            cleaned.append(s.zfill(6))
+            continue
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) == 6:
+            cleaned.append(digits)
+
+    codes = sorted(set(cleaned))
+    if not codes:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    code_list_sql = ",".join([f"'{c}'" for c in codes])
+
+    # Basic info
+    try:
+        basic_df = pd.read_sql(
+            f"SELECT code, name, sector, industry, total_mv, float_mv, pe_ttm FROM stock_basic "
+            f"WHERE code IN ({code_list_sql})",
+            conn,
+        )
+    except Exception:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    if basic_df.empty:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    basic_df = basic_df.set_index("code")
+
+    # Date range from daily_market (for MA20 window)
+    try:
+        max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
+        end_date_str = max_date_res.iloc[0]["max_date"]
+    except Exception:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    if not end_date_str:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    end_date = pd.to_datetime(end_date_str)
+    start_date = end_date - pd.Timedelta(days=int(lookback_days or 60))
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+
+    # Daily (close + MA20)
+    daily_df = pd.read_sql(
+        f"SELECT code, trade_date, close FROM daily_market "
+        f"WHERE code IN ({code_list_sql}) "
+        f"AND trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+        conn,
+    )
+    if daily_df.empty:
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+
+    daily_df["trade_date"] = pd.to_datetime(daily_df["trade_date"])
+    daily_df = daily_df.sort_values(["code", "trade_date"])
+    daily_df["close_20d_avg"] = (
+        daily_df.groupby("code")["close"]
+        .rolling(20, min_periods=1)
+        .mean()
+        .reset_index(0, drop=True)
+    )
+    latest = daily_df.groupby("code").tail(1).set_index("code")
+
+    # Latest financing (may lag daily date; join by code)
+    try:
+        margin_df = pd.read_sql(
+            f"SELECT code, trade_date, net_financing_buy FROM margin_data "
+            f"WHERE code IN ({code_list_sql}) "
+            f"AND trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+            conn,
+        )
+    except Exception:
+        margin_df = pd.DataFrame()
+
+    if not margin_df.empty:
+        margin_df["trade_date"] = pd.to_datetime(margin_df["trade_date"])
+        margin_latest = (
+            margin_df.sort_values(["code", "trade_date"]).groupby("code").tail(1).set_index("code")
+        )
+        latest = latest.join(margin_latest[["net_financing_buy"]], how="left")
+
+    if "net_financing_buy" not in latest.columns:
+        latest["net_financing_buy"] = 0.0
+    latest["net_financing_buy"] = latest["net_financing_buy"].fillna(0.0)
+
+    # Northbound inflow (diff of holding value) - optional
+    nb_inflow_map = {}
+    try:
+        nb_df = pd.read_sql(
+            f"SELECT code, trade_date, net_inflow FROM northbound_data "
+            f"WHERE code IN ({code_list_sql}) "
+            f"AND trade_date >= '{start_date_str}' AND trade_date <= '{end_date_str}'",
+            conn,
+        )
+    except Exception:
+        nb_df = pd.DataFrame()
+
+    if not nb_df.empty:
+        nb_df["trade_date"] = pd.to_datetime(nb_df["trade_date"])
+        nb_df = nb_df.sort_values(["code", "trade_date"])
+        nb_df["nb_inflow"] = nb_df.groupby("code")["net_inflow"].diff()
+        nb_latest = nb_df.groupby("code").tail(1)
+        nb_inflow_map = nb_latest.set_index("code")["nb_inflow"].fillna(0).to_dict()
+
+    rows = []
+    for code in codes:
+        if code not in basic_df.index or code not in latest.index:
+            continue
+
+        info = basic_df.loc[code]
+        info_dict = {
+            "name": info.get("name", ""),
+            "total_mv": info.get("total_mv", 0),
+            "pe_ttm": info.get("pe_ttm", 0),
+            "float_mv": info.get("float_mv", 0),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
+        }
+
+        close = float(latest.loc[code].get("close", 0) or 0)
+        ma20 = float(latest.loc[code].get("close_20d_avg", 0) or 0)
+        fin_net = float(latest.loc[code].get("net_financing_buy", 0) or 0)
+        float_mv = 0.0
+        try:
+            float_mv = float(info_dict.get("float_mv", 0) or 0)
+        except Exception:
+            float_mv = 0.0
+
+        financing_surge_pct = fin_net / float_mv if float_mv > 0 else 0.0
+        nb_inflow = float(nb_inflow_map.get(code, 0.0) or 0.0)
+
+        row_for_signal = {
+            "financing_surge_pct": financing_surge_pct,
+            "nb_inflow": nb_inflow,
+            "net_financing_buy": fin_net,
+            "close": close,
+            "close_20d_avg": ma20,
+        }
+        signal = generate_signals_row(row_for_signal, info_dict)
+
+        rows.append(
+            {
+                "Code": code,
+                "Signal": signal,
+                "Surge Score": round(financing_surge_pct * 1000, 2),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 def get_full_analysis_report():
     """

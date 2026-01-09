@@ -362,18 +362,19 @@ def render_buy_list(df, unique_key, user_id):
 
 def render_sell_list(df, user_id):
     """Renders holdings with 'Sell' buttons."""
-    cols = st.columns([1, 1.5, 1, 1, 1, 0.8])
+    cols = st.columns([1, 1.5, 1, 1, 1, 1.8, 0.8])
     cols[0].markdown("`代码`")
     cols[1].markdown("`名称`")
     cols[2].markdown("`持仓`")
     cols[3].markdown("`现价`")
     cols[4].markdown("`盈亏`")
-    cols[5].markdown("`操作`")
+    cols[5].markdown("`提醒`")
+    cols[6].markdown("`操作`")
     
     st.markdown("---")
     
     for idx, row in df.iterrows():
-        c = st.columns([1, 1.5, 1, 1, 1, 0.8])
+        c = st.columns([1, 1.5, 1, 1, 1, 1.8, 0.8])
         c[0].write(row['code'])
         c[1].write(row['name'])
         c[2].write(str(row['quantity']))
@@ -383,7 +384,12 @@ def render_sell_list(df, user_id):
         color = "red" if pnl > 0 else "green"
         c[4].markdown(f":{color}[{pnl:.0f}]")
         
-        if c[5].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
+        advice = row.get("sell_advice", "-")
+        if not advice:
+            advice = "-"
+        c[5].markdown(advice)
+
+        if c[6].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
             price = row.get('current_price', 0)
             if price > 0:
                 succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, 100)
@@ -595,6 +601,50 @@ elif page == "💼 我的持仓":
     
     st.subheader("持仓列表")
     if not pos.empty:
+        def _sell_advice_from_signal(signal):
+            if not isinstance(signal, str) or not signal:
+                return "-"
+            if "止损离场" in signal:
+                return ":red[⚠ 推荐卖出（止损离场）]"
+            if "黑名单" in signal:
+                return ":red[⚠ 推荐卖出（黑名单）]"
+            if "资金出逃" in signal:
+                return ":orange[💸 建议减仓（资金出逃）]"
+            return "-"
+
+        # Compute signals only for held codes (fast, DB-only).
+        sig_df = pd.DataFrame()
+        conn = None
+        try:
+            conn = get_db_connection()
+            sig_df = analyzer.get_signals_for_codes(conn, pos["code"].tolist())
+        except Exception:
+            sig_df = pd.DataFrame()
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+        pos = pos.copy()
+        if sig_df is not None and not sig_df.empty:
+            pos = pd.merge(pos, sig_df[["Code", "Signal"]], left_on="code", right_on="Code", how="left")
+            pos.drop(columns=["Code"], inplace=True, errors="ignore")
+            pos["sell_advice"] = pos["Signal"].apply(_sell_advice_from_signal)
+        else:
+            pos["sell_advice"] = "-"
+
+        # Show a concise warning list for strong sell signals.
+        try:
+            sell_mask = pos["Signal"].astype(str).str.contains("止损离场|黑名单", na=False)
+            sell_list = pos[sell_mask][["name", "code", "Signal"]].head(10)
+            if not sell_list.empty:
+                items = "、".join([f"{r['name']}({r['code']})" for _, r in sell_list.iterrows()])
+                st.warning(f"⚠ 推荐卖出提醒：{items}")
+        except Exception:
+            pass
+
         render_sell_list(pos, current_user)
     else:
         st.info("空仓中...")
