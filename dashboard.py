@@ -263,8 +263,8 @@ def render_buy_list(df, unique_key, user_id):
             return f":orange[市盈率:{pe_value:.1f}]"
         return f":violet[市盈率:{pe_value:.1f}]"
 
-    # Code, Name, Price, Chg, Signal, Sector/MV, Ind/PE, Fin/NB, Action
-    cols = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 1.0, 0.7])
+    # Code, Name, Price, Chg, Signal, Sector/MV, Ind/PE, Fin/NB/Main, Fin&NB/MV%, Surge Score, Fin&NB/TMV%, Action
+    cols = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 0.8, 1.0, 0.7])
     cols[0].markdown("**代码**")
     cols[1].markdown("**名称**")
     cols[2].markdown("**现价**")
@@ -274,13 +274,14 @@ def render_buy_list(df, unique_key, user_id):
     cols[6].markdown("**行业/PE**")
     cols[7].markdown("**资金(融/北/主)**")
     cols[8].markdown("**资金/流通市值%**")
-    cols[9].markdown("**资金/总市值%**")
-    cols[10].markdown("**操作**")
+    cols[9].markdown("**强度分**")
+    cols[10].markdown("**资金/总市值%**")
+    cols[11].markdown("**操作**")
     
     st.markdown("---")
 
     for idx, row in df.iterrows():
-        c = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 1.0, 0.7])
+        c = st.columns([0.7, 1.0, 0.7, 0.7, 1.1, 1.3, 1.3, 1.4, 1.0, 0.8, 1.0, 0.7])
         c[0].write(row['Code'])
         c[1].write(row['Name'])
         c[2].write(f"{row.get('Real_Price', 0):.2f}")
@@ -328,6 +329,10 @@ def render_buy_list(df, unique_key, user_id):
         nb_pct_str = _fmt_colored_pct("北:", nb_pct)
         c[8].markdown(f"{fin_pct_str} | {nb_pct_str}")
 
+        score = row.get("Surge Score", 0)
+        score_str = _fmt_colored_signed("", score, "")
+        c[9].markdown(score_str)
+
         fin_tmv_pct = row.get('Fin/TMV%', 0)
         nb_tmv_pct = row.get('NB/TMV%', 0)
         try:
@@ -341,10 +346,10 @@ def render_buy_list(df, unique_key, user_id):
 
         fin_tmv_pct_str = _fmt_colored_pct("融:", fin_tmv_pct)
         nb_tmv_pct_str = _fmt_colored_pct("北:", nb_tmv_pct)
-        c[9].markdown(f"{fin_tmv_pct_str} | {nb_tmv_pct_str}")
+        c[10].markdown(f"{fin_tmv_pct_str} | {nb_tmv_pct_str}")
         
         # Button
-        if c[10].button("🟢 买", key=f"btn_buy_{unique_key}_{user_id}_{row['Code']}"):
+        if c[11].button("🟢 买", key=f"btn_buy_{unique_key}_{user_id}_{row['Code']}"):
             price = row.get('Real_Price', 0)
             if price > 0:
                 succ, msg = trader.execute_trade(user_id, 'BUY', row['Code'], row['Name'], price, 100)
