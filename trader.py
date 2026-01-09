@@ -311,7 +311,11 @@ def get_account_info(user_id, price_lookup=None):
                 n = str(row.get("name") or "")
                 fee = calc_trade_fees("SELL", c, n, amount).get("total_fee", 0.0)
                 est_sell_fee.append(float(fee or 0.0))
-            positions["est_sell_fee"] = pd.to_numeric(est_sell_fee, errors="coerce").fillna(0.0)
+            positions["est_sell_fee"] = (
+                pd.to_numeric(pd.Series(est_sell_fee, index=positions.index), errors="coerce")
+                .fillna(0.0)
+                .astype(float)
+            )
             positions["liquidation_value"] = positions["market_value"] - positions["est_sell_fee"]
 
             base = avg_cost * qty
