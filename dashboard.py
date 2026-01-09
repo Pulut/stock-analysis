@@ -499,6 +499,7 @@ st.sidebar.title("🚀 A股资金流向分析")
 
 # User Selection
 current_user = st.sidebar.selectbox("👤 当前用户", ["user1", "user2"])
+st.sidebar.caption(f"🗄️ 数据库: {db.describe_database()}")
 
 if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
@@ -729,8 +730,10 @@ elif page == "💼 我的持仓":
             st.info("未获取到实时价，当前仍使用收盘价估值。")
 
         cash, total, pos = trader.get_account_info(current_user, price_lookup=price_lookup)
-    except:
-        st.error("账户未初始化")
+    except Exception as e:
+        st.error("持仓加载失败（不一定是账户未初始化）。")
+        with st.expander("错误详情"):
+            st.exception(e)
         st.stop()
         
     pnl = total - 100000

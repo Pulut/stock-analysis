@@ -52,6 +52,31 @@ def _normalize_postgres_url(url: str) -> str:
     return url
 
 
+def describe_database() -> str:
+    """
+    Returns a safe, human-readable description of the active DB target.
+    (Never includes credentials.)
+    """
+    backend = get_backend()
+    if backend == "sqlite":
+        return f"sqlite:///{SQLITE_DB_PATH}"
+
+    url = get_database_url()
+    if not url:
+        return "postgres"
+    try:
+        url = _normalize_postgres_url(url)
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        dbname = (parsed.path or "").lstrip("/") or ""
+        if host or dbname:
+            return f"postgres://{host}{port}/{dbname}"
+    except Exception:
+        pass
+    return "postgres"
+
+
 def get_db_connection():
     backend = get_backend()
     if backend == "postgres":
@@ -103,4 +128,3 @@ class CursorAdapter:
 def get_cursor(conn) -> CursorAdapter:
     backend = get_backend()
     return CursorAdapter(conn.cursor(), backend)
-

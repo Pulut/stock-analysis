@@ -129,6 +129,27 @@ def _ensure_trade_schema(cursor, backend: str):
     """
     Add missing columns for existing tables (non-destructive migrations).
     """
+    acct_cols = _get_table_columns(cursor, backend, "trade_account")
+    if "cash" not in acct_cols:
+        if backend == "postgres":
+            cursor.execute("ALTER TABLE trade_account ADD COLUMN IF NOT EXISTS cash REAL")
+        else:
+            cursor.execute("ALTER TABLE trade_account ADD COLUMN cash REAL")
+    if "total_assets" not in acct_cols:
+        if backend == "postgres":
+            cursor.execute("ALTER TABLE trade_account ADD COLUMN IF NOT EXISTS total_assets REAL")
+        else:
+            cursor.execute("ALTER TABLE trade_account ADD COLUMN total_assets REAL")
+    if "updated_at" not in acct_cols:
+        if backend == "postgres":
+            cursor.execute(
+                "ALTER TABLE trade_account ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            )
+        else:
+            cursor.execute(
+                "ALTER TABLE trade_account ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            )
+
     pos_cols = _get_table_columns(cursor, backend, "trade_positions")
     if "open_time" not in pos_cols:
         if backend == "postgres":
