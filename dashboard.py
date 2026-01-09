@@ -94,6 +94,30 @@ def enrich_with_realtime_data(df):
         st.warning(f"无法获取实时行情: {e}")
         return df
 
+def load_report_df(get_realtime: bool):
+    """Lazy-load the heavy analysis report only when needed by the current page."""
+    with st.spinner("正在加载数据..."):
+        df = load_analysis_report()
+
+    if df is None or df.empty:
+        st.error("数据未加载，请运行 data_loader.py")
+        st.stop()
+
+    # Avoid mutating Streamlit cached objects.
+    df = df.copy()
+
+    if get_realtime:
+        with st.spinner("📡 同步交易所行情..."):
+            df = enrich_with_realtime_data(df)
+    else:
+        df["Real_Price"] = df["Close"]
+        df["Real_Chg_Pct"] = df.get("Chg%", 0.0)
+        df["Real_Chg_Pct"] = df["Real_Chg_Pct"].fillna(0.0)
+        df["Open_Pct"] = 0.0
+        df["Vol_Ratio"] = 0.0
+
+    return df
+
 def get_stock_history(code):
     conn = analyzer.get_db_connection()
     df, info = analyzer.get_stock_data(code, conn)
@@ -433,28 +457,10 @@ with st.sidebar.container():
         else: st.error("无效代码")
 
 
-# Load Main Data
-with st.spinner("正在加载数据..."):
-    report_df = load_analysis_report()
-
-if report_df.empty:
-    st.error("数据未加载，请运行 data_loader.py")
-    st.stop()
-
-if get_realtime:
-    with st.spinner("📡 同步交易所行情..."):
-        report_df = enrich_with_realtime_data(report_df)
-else:
-    report_df['Real_Price'] = report_df['Close']
-    # Fallback: use last trading day's pct change from the analysis snapshot.
-    report_df['Real_Chg_Pct'] = report_df.get('Chg%', 0.0)
-    report_df['Real_Chg_Pct'] = report_df['Real_Chg_Pct'].fillna(0.0)
-    report_df['Open_Pct'] = 0.0
-    report_df['Vol_Ratio'] = 0.0
-
 # --- Page 1: Market Overview ---
 if page == "市场概览":
     st.title("📊 市场资金概览 (沪深全市场)")
+    report_df = load_report_df(get_realtime)
     
     conn = get_db_connection()
     sentiment, up, down, last_date = analyzer.get_market_sentiment(conn)
@@ -503,6 +509,7 @@ if page == "市场概览":
 # --- Page 2: Smart Scanner ---
 elif page == "智能选股":
     st.title("📡 智能信号筛选器")
+    report_df = load_report_df(get_realtime)
     
     c1, c2, c3, c4 = st.columns(4)
     sig = c1.multiselect("信号", report_df['Signal'].unique())
@@ -545,13 +552,28 @@ elif page == "💼 我的持仓":
     st.title(f"💼 我的模拟持仓 ({current_user})")
     
     try:
-        price_lookup = None
+        # Fast pricing: use last close from DB for held codes (no AkShare network call).
+        price_lookup = {}
+        conn = None
         try:
-            codes = report_df["Code"].astype(str).str.zfill(6)
-            prices = pd.to_numeric(report_df.get("Real_Price"), errors="coerce")
-            price_lookup = dict(zip(codes, prices))
-        except Exception:
-            price_lookup = None
+            conn = get_db_connection()
+            cursor = db.get_cursor(conn)
+            cursor.execute("SELECT code FROM trade_positions WHERE user_id=?", (current_user,))
+            held_codes = [str(r[0]).zfill(6) for r in cursor.fetchall()]
+            for code in held_codes:
+                cursor.execute(
+                    "SELECT close FROM daily_market WHERE code=? ORDER BY trade_date DESC LIMIT 1",
+                    (code,),
+                )
+                res = cursor.fetchone()
+                if res and res[0] is not None:
+                    price_lookup[code] = float(res[0])
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
         cash, total, pos = trader.get_account_info(current_user, price_lookup=price_lookup)
     except:
