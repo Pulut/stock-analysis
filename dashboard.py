@@ -155,48 +155,51 @@ def fetch_realtime_quotes_for_codes(codes):
     if not codes:
         return {}
 
-    # Build secids: 1.xxxxxx for SH, 0.xxxxxx for SZ
-    secids = []
-    for code in codes:
-        market = "1" if code.startswith(("60", "68")) else "0"
-        secids.append(f"{market}.{code}")
-
-    url = "https://push2.eastmoney.com/api/qt/ulist/get"
-    params = {
-        "fltt": 2,
-        "invt": 2,
-        "fields": "f12,f14,f2,f3",
-        "secids": ",".join(secids),
-    }
-
+    quotes = {}
     session = requests.Session()
     session.trust_env = False
+    session.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0 (compatible; stock_g/1.0)",
+            "Accept": "application/json,text/plain,*/*",
+        }
+    )
 
-    try:
-        resp = session.get(url, params=params, timeout=10)
-        data = resp.json() if resp is not None else {}
-    except Exception:
-        return {}
+    def _to_float(v, scale=None):
+        try:
+            if v in (None, "", "-"):
+                return None
+            x = float(v)
+            if scale:
+                x = x / scale
+            return x
+        except Exception:
+            return None
 
-    diff = (((data or {}).get("data") or {}).get("diff") or [])
-    quotes = {}
-    for item in diff:
-        code = str(item.get("f12") or "").zfill(6)
-        if not code or code == "000000":
+    # Eastmoney quote endpoint (single secid per call).
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    fields = "f57,f58,f43,f170"
+
+    for code in codes:
+        # Eastmoney secid market: 1=SH, 0=SZ/BJ (covers A-shares, ETFs, etc.)
+        market = "1" if code.startswith(("6", "5", "9", "11")) else "0"
+        secid = f"{market}.{code}"
+        try:
+            resp = session.get(url, params={"secid": secid, "fields": fields}, timeout=6)
+            payload = resp.json() if resp is not None else {}
+        except Exception:
             continue
 
-        def _to_float(v):
-            try:
-                if v in (None, "", "-"):
-                    return None
-                return float(v)
-            except Exception:
-                return None
+        if (payload or {}).get("rc") != 0:
+            continue
+        data = (payload or {}).get("data") or {}
 
-        quotes[code] = {
-            "name": item.get("f14"),
-            "price": _to_float(item.get("f2")),
-            "chg_pct": _to_float(item.get("f3")),
+        # f43/f170 are scaled by 100 on this endpoint.
+        real_code = str(data.get("f57") or code).zfill(6)
+        quotes[real_code] = {
+            "name": data.get("f58"),
+            "price": _to_float(data.get("f43"), scale=100),
+            "chg_pct": _to_float(data.get("f170"), scale=100),
         }
 
     return quotes
