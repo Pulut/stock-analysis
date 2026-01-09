@@ -261,54 +261,73 @@ def get_full_analysis_report():
         nb_hold_map = nb_latest.set_index('code')['nb_hold_val'].to_dict()
         nb_inflow_map = nb_latest.set_index('code')['nb_inflow'].fillna(0).to_dict()
 
-    # 5. Merging (Left Join on Code + Date)
-    merged = pd.merge(daily_df, margin_df, on=['code', 'trade_date'], how='left')
+    # 5. Daily-only calculations (MA/Chg)
+    # daily_market often updates earlier than funding tables; avoid joining by date here to prevent
+    # "missing funding on latest market day -> filled as 0 -> rankings become empty" issues.
+    daily_df = daily_df.sort_values(['code', 'trade_date'])
+    daily_df['close_20d_avg'] = (
+        daily_df.groupby('code')['close']
+        .rolling(20, min_periods=1)
+        .mean()
+        .reset_index(0, drop=True)
+    )
+    daily_df['chg_pct'] = daily_df.groupby('code')['close'].pct_change() * 100
+
+    # Latest daily snapshot per code
+    latest_snapshot = daily_df.groupby('code').tail(1).copy()
+
+    # Join latest financing/main fund snapshots by code (not by date)
+    latest_snapshot = latest_snapshot.set_index('code')
+
+    if not margin_df.empty:
+        margin_latest = (
+            margin_df.sort_values(['code', 'trade_date'])
+            .groupby('code')
+            .tail(1)
+            .set_index('code')
+        )
+        latest_snapshot = latest_snapshot.join(
+            margin_latest[
+                [
+                    'financing_buy',
+                    'financing_balance',
+                    'securities_sell',
+                    'securities_balance',
+                    'net_financing_buy',
+                ]
+            ],
+            how='left',
+        )
+
     if not main_df.empty:
-        merged = pd.merge(merged, main_df, on=['code', 'trade_date'], how='left')
+        main_latest = (
+            main_df.sort_values(['code', 'trade_date'])
+            .groupby('code')
+            .tail(1)
+            .set_index('code')
+        )
+        latest_snapshot = latest_snapshot.join(main_latest[['main_net_inflow']], how='left')
 
-    merged = merged.sort_values(['code', 'trade_date'])
+    latest_snapshot = latest_snapshot.reset_index()
 
-    # Carry forward "balance/position" style fields when funding tables lag daily_market.
-    for col in ['financing_balance', 'securities_balance']:
-        if col in merged.columns:
-            merged[col] = merged.groupby('code')[col].ffill()
+    # Fill missing fund fields
+    for col in ['financing_buy', 'financing_balance', 'securities_sell', 'securities_balance', 'net_financing_buy']:
+        if col not in latest_snapshot.columns:
+            latest_snapshot[col] = 0.0
+        latest_snapshot[col] = latest_snapshot[col].fillna(0)
 
-    # Fill NAs (non-margin/northbound stocks or leading gaps)
-    for col in ['financing_buy', 'financing_balance', 'net_financing_buy']:
-        if col not in merged.columns:
-            merged[col] = 0.0
-        merged[col] = merged[col].fillna(0)
+    if 'main_net_inflow' not in latest_snapshot.columns:
+        latest_snapshot['main_net_inflow'] = 0.0
+    latest_snapshot['main_net_inflow'] = latest_snapshot['main_net_inflow'].fillna(0)
 
-    if 'main_net_inflow' not in merged.columns:
-        merged['main_net_inflow'] = 0.0
-    merged['main_net_inflow'] = merged['main_net_inflow'].fillna(0)
+    # 6. Vectorized Calculations on snapshot
+    latest_snapshot['float_mv'] = latest_snapshot['code'].map(basic_df['float_mv'])
 
-    # 6. Vectorized Calculations
-    # Map float_mv from basic_df
-    # We use map for faster lookup
-    merged['float_mv'] = merged['code'].map(basic_df['float_mv'])
-    
-    # Financing Surge
-    # Avoid division by zero
-    merged['financing_surge_pct'] = 0.0
-    mask_mv = (merged['float_mv'] > 0)
-    merged.loc[mask_mv, 'financing_surge_pct'] = merged.loc[mask_mv, 'net_financing_buy'] / merged.loc[mask_mv, 'float_mv']
-
-    # Moving Averages
-    # rolling() on groupby is reasonably fast
-    merged['close_20d_avg'] = merged.groupby('code')['close'].rolling(20, min_periods=1).mean().reset_index(0, drop=True)
-    
-    # 7. Extract Latest Snapshot
-    # Get the row with max date for EACH code
-    latest_snapshot = merged.groupby('code').tail(1).copy()
-    
-    # Need 'previous close' for Chg% calculation if not present.
-    # Actually, daily_market doesn't store Chg%, so we calculate it.
-    # We need the row BEFORE the last one.
-    # Alternative: use pct_change() on the full set.
-    merged['chg_pct'] = merged.groupby('code')['close'].pct_change() * 100
-    # Update snapshot with chg_pct
-    latest_snapshot['chg_pct'] = merged.loc[latest_snapshot.index, 'chg_pct'].fillna(0)
+    latest_snapshot['financing_surge_pct'] = 0.0
+    mask_mv = latest_snapshot['float_mv'] > 0
+    latest_snapshot.loc[mask_mv, 'financing_surge_pct'] = (
+        latest_snapshot.loc[mask_mv, 'net_financing_buy'] / latest_snapshot.loc[mask_mv, 'float_mv']
+    )
 
     # 8. Final Formatting & Signal Generation
     results = []
