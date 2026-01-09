@@ -185,7 +185,7 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
     small holdings list.
     """
     if not codes:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     cleaned = []
     for c in codes:
@@ -203,7 +203,7 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
 
     codes = sorted(set(cleaned))
     if not codes:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     code_list_sql = ",".join([f"'{c}'" for c in codes])
 
@@ -215,10 +215,10 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
             conn,
         )
     except Exception:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     if basic_df.empty:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     basic_df = basic_df.set_index("code")
 
@@ -227,10 +227,10 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
         max_date_res = pd.read_sql("SELECT MAX(trade_date) as max_date FROM daily_market", conn)
         end_date_str = max_date_res.iloc[0]["max_date"]
     except Exception:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     if not end_date_str:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     end_date = pd.to_datetime(end_date_str)
     start_date = end_date - pd.Timedelta(days=int(lookback_days or 60))
@@ -245,7 +245,7 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
         conn,
     )
     if daily_df.empty:
-        return pd.DataFrame(columns=["Code", "Signal", "Surge Score"])
+        return pd.DataFrame(columns=["Code", "Signal", "Surge Score", "MA20", "Daily Close", "Daily Date"])
 
     daily_df["trade_date"] = pd.to_datetime(daily_df["trade_date"])
     daily_df = daily_df.sort_values(["code", "trade_date"])
@@ -334,11 +334,24 @@ def get_signals_for_codes(conn, codes, lookback_days: int = 60):
         }
         signal = generate_signals_row(row_for_signal, info_dict)
 
+        daily_date = None
+        try:
+            daily_date = latest.loc[code].get("trade_date")
+            if pd.notna(daily_date):
+                daily_date = pd.to_datetime(daily_date).strftime("%Y-%m-%d")
+            else:
+                daily_date = None
+        except Exception:
+            daily_date = None
+
         rows.append(
             {
                 "Code": code,
                 "Signal": signal,
                 "Surge Score": round(financing_surge_pct * 1000, 2),
+                "MA20": round(ma20, 2) if ma20 else 0.0,
+                "Daily Close": round(close, 2) if close else 0.0,
+                "Daily Date": daily_date or "",
             }
         )
 

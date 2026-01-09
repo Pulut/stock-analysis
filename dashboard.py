@@ -7,6 +7,7 @@ import sqlite3
 import akshare as ak
 import db
 import trader 
+import requests
 import threading
 import time
 import datetime
@@ -127,6 +128,79 @@ def get_stock_history(code):
 def get_db_connection():
     return analyzer.get_db_connection()
 
+def fetch_realtime_quotes_for_codes(codes):
+    """
+    Fetch realtime quotes for a small list of A-share codes via Eastmoney push2 API.
+
+    Returns: dict {code: {"price": float|None, "chg_pct": float|None, "name": str|None}}
+    """
+    if not codes:
+        return {}
+
+    cleaned = []
+    for c in codes:
+        if c is None:
+            continue
+        s = str(c).strip()
+        if not s:
+            continue
+        if s.isdigit() and len(s) <= 6:
+            cleaned.append(s.zfill(6))
+            continue
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) == 6:
+            cleaned.append(digits)
+
+    codes = sorted(set(cleaned))
+    if not codes:
+        return {}
+
+    # Build secids: 1.xxxxxx for SH, 0.xxxxxx for SZ
+    secids = []
+    for code in codes:
+        market = "1" if code.startswith(("60", "68")) else "0"
+        secids.append(f"{market}.{code}")
+
+    url = "https://push2.eastmoney.com/api/qt/ulist/get"
+    params = {
+        "fltt": 2,
+        "invt": 2,
+        "fields": "f12,f14,f2,f3",
+        "secids": ",".join(secids),
+    }
+
+    session = requests.Session()
+    session.trust_env = False
+
+    try:
+        resp = session.get(url, params=params, timeout=10)
+        data = resp.json() if resp is not None else {}
+    except Exception:
+        return {}
+
+    diff = (((data or {}).get("data") or {}).get("diff") or [])
+    quotes = {}
+    for item in diff:
+        code = str(item.get("f12") or "").zfill(6)
+        if not code or code == "000000":
+            continue
+
+        def _to_float(v):
+            try:
+                if v in (None, "", "-"):
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        quotes[code] = {
+            "name": item.get("f14"),
+            "price": _to_float(item.get("f2")),
+            "chg_pct": _to_float(item.get("f3")),
+        }
+
+    return quotes
+
 # --- Northbound (Top10 Deal) helpers ---
 def load_northbound_top10_deal(conn):
     """
@@ -167,14 +241,14 @@ def render_northbound_deal_list(df, unique_key, user_id):
         try:
             v = float(v)
         except Exception:
-            return "-"
+            return "—"
         return f"{v/100000000:.2f}亿"
 
     def _fmt_chg(v):
         try:
             v = float(v)
         except Exception:
-            return "-"
+            return "—"
         color = "red" if v > 0 else "green"
         return f":{color}[{v:.2f}%]"
 
@@ -232,9 +306,9 @@ def render_buy_list(df, unique_key, user_id):
         try:
             value = float(value)
         except Exception:
-            return "-"
+            return "—"
         if value == 0:
-            return "-"
+            return "—"
         color = "red" if value > 0 else "green"
         return f":{color}[{label}{value:+.2f}{suffix}]"
 
@@ -242,9 +316,9 @@ def render_buy_list(df, unique_key, user_id):
         try:
             value = float(value)
         except Exception:
-            return "-"
+            return "—"
         if value == 0:
-            return "-"
+            return "—"
         color = "red" if value > 0 else "green"
         return f":{color}[{label}{value:+.2f}%]"
 
@@ -384,9 +458,9 @@ def render_sell_list(df, user_id):
         color = "red" if pnl > 0 else "green"
         c[4].markdown(f":{color}[{pnl:.0f}]")
         
-        advice = row.get("sell_advice", "-")
+        advice = row.get("sell_advice", "—")
         if not advice:
-            advice = "-"
+            advice = "—"
         c[5].markdown(advice)
 
         if c[6].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
@@ -563,8 +637,9 @@ elif page == "💼 我的持仓":
     st.title(f"💼 我的模拟持仓 ({current_user})")
     
     try:
-        # Fast pricing: use last close from DB for held codes (no AkShare network call).
-        price_lookup = {}
+        # Default pricing: use last close from DB for held codes (no network call).
+        last_close_lookup = {}
+        held_codes = []
         conn = None
         try:
             conn = get_db_connection()
@@ -578,13 +653,61 @@ elif page == "💼 我的持仓":
                 )
                 res = cursor.fetchone()
                 if res and res[0] is not None:
-                    price_lookup[code] = float(res[0])
+                    last_close_lookup[code] = float(res[0])
         finally:
             try:
                 if conn is not None:
                     conn.close()
             except Exception:
                 pass
+
+        # --- Intraday controls (optional realtime quotes for holdings only) ---
+        if "holdings_rt_quotes" not in st.session_state:
+            st.session_state["holdings_rt_quotes"] = {}
+        if "holdings_rt_ts" not in st.session_state:
+            st.session_state["holdings_rt_ts"] = ""
+        if "holdings_use_realtime" not in st.session_state:
+            st.session_state["holdings_use_realtime"] = False
+
+        st.caption("默认使用最新收盘价估值；盘中可刷新持仓实时价（仅持仓）用于止损/MA20 提醒。")
+        stop_loss_pct = st.slider(
+            "盘中止损阈值(%)",
+            min_value=1.0,
+            max_value=20.0,
+            value=7.0,
+            step=0.5,
+            key="holdings_stop_loss_pct",
+        )
+
+        rt_cols = st.columns([1.3, 1.0, 2.2])
+        refresh_clicked = rt_cols[0].button("📡 刷新实时价(仅持仓)", disabled=(len(held_codes) == 0))
+        if refresh_clicked:
+            with st.spinner("正在获取持仓实时价..."):
+                quotes = fetch_realtime_quotes_for_codes(held_codes)
+            if quotes:
+                st.session_state["holdings_rt_quotes"] = quotes
+                bj_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+                st.session_state["holdings_rt_ts"] = bj_now.strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state["holdings_use_realtime"] = True
+            else:
+                st.warning("实时价获取失败，仍使用收盘价。")
+
+        use_realtime = rt_cols[1].checkbox("使用实时价", key="holdings_use_realtime", disabled=(len(held_codes) == 0))
+        if st.session_state.get("holdings_rt_ts"):
+            rt_cols[2].caption(f"实时价更新时间：{st.session_state['holdings_rt_ts']}")
+
+        rt_quotes = st.session_state.get("holdings_rt_quotes") or {}
+        rt_price_lookup = {
+            str(code).zfill(6): (q or {}).get("price")
+            for code, q in rt_quotes.items()
+            if (q or {}).get("price")
+        }
+
+        price_lookup = dict(last_close_lookup)
+        if use_realtime and rt_price_lookup:
+            price_lookup.update(rt_price_lookup)
+        elif use_realtime and held_codes and not rt_price_lookup:
+            st.info("未获取到实时价，当前仍使用收盘价估值。")
 
         cash, total, pos = trader.get_account_info(current_user, price_lookup=price_lookup)
     except:
@@ -603,14 +726,14 @@ elif page == "💼 我的持仓":
     if not pos.empty:
         def _sell_advice_from_signal(signal):
             if not isinstance(signal, str) or not signal:
-                return "-"
+                return "—"
             if "止损离场" in signal:
                 return ":red[⚠ 推荐卖出（止损离场）]"
             if "黑名单" in signal:
                 return ":red[⚠ 推荐卖出（黑名单）]"
             if "资金出逃" in signal:
                 return ":orange[💸 建议减仓（资金出逃）]"
-            return "-"
+            return "—"
 
         # Compute signals only for held codes (fast, DB-only).
         sig_df = pd.DataFrame()
@@ -629,16 +752,61 @@ elif page == "💼 我的持仓":
 
         pos = pos.copy()
         if sig_df is not None and not sig_df.empty:
-            pos = pd.merge(pos, sig_df[["Code", "Signal"]], left_on="code", right_on="Code", how="left")
+            pos = pd.merge(pos, sig_df[["Code", "Signal", "MA20"]], left_on="code", right_on="Code", how="left")
             pos.drop(columns=["Code"], inplace=True, errors="ignore")
-            pos["sell_advice"] = pos["Signal"].apply(_sell_advice_from_signal)
         else:
-            pos["sell_advice"] = "-"
+            pos["Signal"] = ""
+            pos["MA20"] = 0.0
 
-        # Show a concise warning list for strong sell signals.
+        pos["daily_advice"] = pos["Signal"].apply(_sell_advice_from_signal)
+        pos["intraday_advice"] = "—"
+
+        # Intraday rules (only when realtime is enabled & available)
+        rt_quotes_local = st.session_state.get("holdings_rt_quotes") or {}
+        use_realtime_effective = bool(use_realtime and rt_quotes_local)
+        if use_realtime_effective:
+            pos["rt_chg_pct"] = pos["code"].astype(str).str.zfill(6).map(
+                lambda c: (rt_quotes_local.get(c) or {}).get("chg_pct")
+            )
+            pos["rt_chg_pct"] = pd.to_numeric(pos["rt_chg_pct"], errors="coerce").fillna(0.0)
+
+            pos["profit_pct"] = pd.to_numeric(pos.get("profit_pct"), errors="coerce").fillna(0.0)
+            pos["avg_cost"] = pd.to_numeric(pos.get("avg_cost"), errors="coerce").fillna(0.0)
+            pos["current_price"] = pd.to_numeric(pos.get("current_price"), errors="coerce").fillna(0.0)
+            pos["MA20"] = pd.to_numeric(pos.get("MA20"), errors="coerce").fillna(0.0)
+
+            stop_thresh = float(stop_loss_pct or 0)
+            stop_mask = (pos["avg_cost"] > 0) & (pos["profit_pct"] <= -stop_thresh)
+            pos.loc[stop_mask, "intraday_advice"] = pos.loc[stop_mask, "profit_pct"].apply(
+                lambda v: f":red[⚠ 盘中止损 {v:.2f}%]"
+            )
+
+            ma20_mask = (
+                (~stop_mask)
+                & (pos["MA20"] > 0)
+                & (pos["current_price"] < pos["MA20"])
+                & (pos["rt_chg_pct"] < 0)
+            )
+            pos.loc[ma20_mask, "intraday_advice"] = ":orange[📉 盘中跌破MA20]"
+
+        def _severity(advice):
+            if isinstance(advice, str) and advice.startswith(":red["):
+                return 2
+            if isinstance(advice, str) and advice.startswith(":orange["):
+                return 1
+            return 0
+
+        pos["sell_advice"] = pos.apply(
+            lambda r: r["intraday_advice"]
+            if _severity(r["intraday_advice"]) >= _severity(r["daily_advice"])
+            else r["daily_advice"],
+            axis=1,
+        )
+
+        # Show a concise warning list for strong sell advice.
         try:
-            sell_mask = pos["Signal"].astype(str).str.contains("止损离场|黑名单", na=False)
-            sell_list = pos[sell_mask][["name", "code", "Signal"]].head(10)
+            sell_mask = pos["sell_advice"].astype(str).str.startswith(":red[", na=False)
+            sell_list = pos[sell_mask][["name", "code"]].head(10)
             if not sell_list.empty:
                 items = "、".join([f"{r['name']}({r['code']})" for _, r in sell_list.iterrows()])
                 st.warning(f"⚠ 推荐卖出提醒：{items}")
