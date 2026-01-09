@@ -1,5 +1,6 @@
 import pandas as pd
 import datetime
+import os
 import db
 
 DB_PATH = db.SQLITE_DB_PATH
@@ -11,6 +12,151 @@ def _now_beijing_str() -> str:
     # Beijing time is UTC+8 (no DST). Use UTC offset to avoid tzdata availability issues.
     bj_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     return bj_now.strftime("%Y-%m-%d %H:%M:%S")
+
+COMMISSION_RATE = float(os.environ.get("TRADE_COMMISSION_RATE", "0.0003"))  # 0.03%
+MIN_COMMISSION = float(os.environ.get("TRADE_MIN_COMMISSION", "5"))  # RMB
+STAMP_DUTY_RATE = float(os.environ.get("TRADE_STAMP_DUTY_RATE", "0.001"))  # 0.1% (SELL stocks only)
+TRANSFER_FEE_RATE_SH = float(os.environ.get("TRADE_TRANSFER_FEE_RATE_SH", "0.00001"))  # 0.001% (SH only)
+
+
+def _round_money(v: float) -> float:
+    try:
+        return round(float(v), 2)
+    except Exception:
+        return 0.0
+
+
+def _normalize_code(code: str) -> str:
+    if code is None:
+        return ""
+    s = str(code).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) <= 6:
+        return digits.zfill(6)
+    return digits[-6:]
+
+
+def _market_for_code(code: str) -> str:
+    # Eastmoney-compatible: 1=SH, 0=SZ/BJ. Here we only need SH vs non-SH for fees.
+    code = _normalize_code(code)
+    if not code:
+        return "SZ"
+    return "SH" if code.startswith(("6", "5", "9", "11")) else "SZ"
+
+
+def _instrument_type(code: str, name: str = "") -> str:
+    """
+    Rough instrument classification for fee rules.
+    - stock: default
+    - fund: ETFs/LOF etc (no stamp duty)
+    - bond: bonds/convertible bonds (simplified)
+    """
+    code = _normalize_code(code)
+    name = str(name or "")
+
+    if name:
+        upper = name.upper()
+        if "ETF" in upper or "LOF" in upper:
+            return "fund"
+        if "债" in name or "转债" in name:
+            return "bond"
+        if "基金" in name:
+            return "fund"
+
+    if code.startswith(("11", "12", "13")):
+        return "bond"
+    if code.startswith(("15", "16", "18", "5")):
+        return "fund"
+    return "stock"
+
+
+def calc_trade_fees(action: str, code: str, name: str, amount: float) -> dict:
+    """
+    Returns fee breakdown for one trade (approximate A-share rules).
+    """
+    action = str(action or "").upper().strip()
+    code = _normalize_code(code)
+    amount = max(0.0, float(amount or 0.0))
+
+    instrument = _instrument_type(code, name)
+    market = _market_for_code(code)
+
+    commission = 0.0
+    if amount > 0:
+        commission = max(MIN_COMMISSION, amount * COMMISSION_RATE)
+    commission = _round_money(commission)
+
+    stamp_duty = 0.0
+    if action == "SELL" and instrument == "stock" and amount > 0:
+        stamp_duty = _round_money(amount * STAMP_DUTY_RATE)
+
+    transfer_fee = 0.0
+    if market == "SH" and instrument != "bond" and amount > 0:
+        transfer_fee = _round_money(amount * TRANSFER_FEE_RATE_SH)
+
+    total_fee = _round_money(commission + stamp_duty + transfer_fee)
+    return {
+        "commission": commission,
+        "stamp_duty": stamp_duty,
+        "transfer_fee": transfer_fee,
+        "total_fee": total_fee,
+        "instrument": instrument,
+        "market": market,
+    }
+
+
+def _get_table_columns(cursor, backend: str, table: str) -> set:
+    try:
+        if backend == "sqlite":
+            cursor.execute(f"PRAGMA table_info({table})")
+            return {str(r[1]) for r in cursor.fetchall() if r and len(r) > 1}
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=?
+            """,
+            (table,),
+        )
+        return {str(r[0]) for r in cursor.fetchall() if r}
+    except Exception:
+        return set()
+
+
+def _ensure_trade_schema(cursor, backend: str):
+    """
+    Add missing columns for existing tables (non-destructive migrations).
+    """
+    pos_cols = _get_table_columns(cursor, backend, "trade_positions")
+    if "open_time" not in pos_cols:
+        if backend == "postgres":
+            cursor.execute("ALTER TABLE trade_positions ADD COLUMN IF NOT EXISTS open_time TEXT")
+        else:
+            cursor.execute("ALTER TABLE trade_positions ADD COLUMN open_time TEXT")
+    if "last_trade_time" not in pos_cols:
+        if backend == "postgres":
+            cursor.execute(
+                "ALTER TABLE trade_positions ADD COLUMN IF NOT EXISTS last_trade_time TEXT"
+            )
+        else:
+            cursor.execute("ALTER TABLE trade_positions ADD COLUMN last_trade_time TEXT")
+
+    order_cols = _get_table_columns(cursor, backend, "trade_orders")
+    for col, col_type in [
+        ("stamp_duty", "REAL"),
+        ("transfer_fee", "REAL"),
+        ("total_fee", "REAL"),
+        ("cash_change", "REAL"),
+        ("realized_pnl", "REAL"),
+    ]:
+        if col in order_cols:
+            continue
+        if backend == "postgres":
+            cursor.execute(f"ALTER TABLE trade_orders ADD COLUMN IF NOT EXISTS {col} {col_type}")
+        else:
+            cursor.execute(f"ALTER TABLE trade_orders ADD COLUMN {col} {col_type}")
 
 def init_trade_system(initial_capital=100000.0, users=None, reset=False):
     """
@@ -49,6 +195,8 @@ def init_trade_system(initial_capital=100000.0, users=None, reset=False):
             name TEXT,
             quantity INTEGER,
             avg_cost REAL,
+            open_time TEXT,
+            last_trade_time TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, code)
         )
@@ -68,10 +216,18 @@ def init_trade_system(initial_capital=100000.0, users=None, reset=False):
             quantity INTEGER,
             amount REAL,
             commission REAL,
+            stamp_duty REAL,
+            transfer_fee REAL,
+            total_fee REAL,
+            cash_change REAL,
+            realized_pnl REAL,
             balance_after REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # Non-destructive migrations for existing DBs.
+    _ensure_trade_schema(cursor, backend)
     
     # Initialize Accounts for user1 and user2 (or passed-in users)
     if users is None:
@@ -110,6 +266,7 @@ def get_account_info(user_id, price_lookup=None):
         positions = pd.read_sql(f"SELECT * FROM trade_positions WHERE user_id='{user_id}'", conn)
         
         market_val = 0.0
+        liquidation_val = 0.0
         
         if not positions.empty:
             positions["code"] = positions["code"].astype(str).str.zfill(6)
@@ -124,14 +281,74 @@ def get_account_info(user_id, price_lookup=None):
 
             positions["current_price"] = prices
             positions["market_value"] = prices * qty
-            positions["profit"] = (prices - avg_cost) * qty
+
+            # Estimate liquidation value & profit net of SELL fees (more realistic).
+            est_sell_fee = []
+            for _, row in positions.iterrows():
+                amount = float(row.get("market_value") or 0.0)
+                c = str(row.get("code") or "")
+                n = str(row.get("name") or "")
+                fee = calc_trade_fees("SELL", c, n, amount).get("total_fee", 0.0)
+                est_sell_fee.append(float(fee or 0.0))
+            positions["est_sell_fee"] = pd.to_numeric(est_sell_fee, errors="coerce").fillna(0.0)
+            positions["liquidation_value"] = positions["market_value"] - positions["est_sell_fee"]
+
+            base = avg_cost * qty
+            positions["profit"] = positions["liquidation_value"] - base
             positions["profit_pct"] = 0.0
-            mask = avg_cost > 0
-            positions.loc[mask, "profit_pct"] = (prices[mask] - avg_cost[mask]) / avg_cost[mask] * 100.0
+            mask = base > 0
+            positions.loc[mask, "profit_pct"] = positions.loc[mask, "profit"] / base[mask] * 100.0
 
             market_val = float(positions["market_value"].sum() or 0.0)
+            liquidation_val = float(positions["liquidation_value"].sum() or 0.0)
+
+            # Backfill open_time / last_trade_time for old rows (best effort).
+            if "open_time" in positions.columns:
+                try:
+                    missing = positions["open_time"].isna() | (
+                        positions["open_time"].astype(str).str.strip() == ""
+                    )
+                    for idx in positions[missing].index.tolist():
+                        c = str(positions.loc[idx, "code"] or "").zfill(6)
+                        cursor.execute(
+                            "SELECT MIN(created_at) FROM trade_orders WHERE user_id=? AND code=? AND action='BUY'",
+                            (user_id, c),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            t = str(r[0])
+                            positions.loc[idx, "open_time"] = t
+                            cursor.execute(
+                                "UPDATE trade_positions SET open_time=? WHERE user_id=? AND code=?",
+                                (t, user_id, c),
+                            )
+                except Exception:
+                    pass
+
+            if "last_trade_time" in positions.columns:
+                try:
+                    missing = positions["last_trade_time"].isna() | (
+                        positions["last_trade_time"].astype(str).str.strip() == ""
+                    )
+                    for idx in positions[missing].index.tolist():
+                        c = str(positions.loc[idx, "code"] or "").zfill(6)
+                        cursor.execute(
+                            "SELECT MAX(created_at) FROM trade_orders WHERE user_id=? AND code=?",
+                            (user_id, c),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            t = str(r[0])
+                            positions.loc[idx, "last_trade_time"] = t
+                            cursor.execute(
+                                "UPDATE trade_positions SET last_trade_time=? WHERE user_id=? AND code=?",
+                                (t, user_id, c),
+                            )
+                except Exception:
+                    pass
         
-        total_assets = cash + market_val
+        # Total assets using liquidation value (net of estimated SELL fees).
+        total_assets = cash + (liquidation_val if not positions.empty else 0.0)
         
         # Update DB
         cursor.execute("UPDATE trade_account SET total_assets = ? WHERE user_id=?", (total_assets, user_id))
@@ -149,66 +366,156 @@ def execute_trade(user_id, action, code, name, price, quantity):
     cursor = db.get_cursor(conn)
     
     try:
+        action = str(action or "").upper().strip()
+        code = _normalize_code(code)
+        name = str(name or "")
+        price = float(price or 0.0)
+        quantity = int(quantity or 0)
+
+        if action not in ("BUY", "SELL"):
+            return False, "非法操作"
+        if not code:
+            return False, "代码无效"
+        if quantity <= 0:
+            return False, "数量必须>0"
+        if price <= 0:
+            return False, "价格无效"
+
         # Get current cash
         cursor.execute("SELECT cash FROM trade_account WHERE user_id=?", (user_id,))
         res = cursor.fetchone()
-        if not res: return False, "用户不存在"
-        current_cash = res[0]
-        
-        amount = price * quantity
-        commission = max(5, amount * 0.0003)
-        
-        if action == 'BUY':
-            cost = amount + commission
+        if not res:
+            return False, "账户未初始化"
+        current_cash = float(res[0] or 0.0)
+
+        trade_time = _now_beijing_str()
+        trade_date = trade_time[:10]
+
+        amount = _round_money(price * quantity)
+        fees = calc_trade_fees(action, code, name, amount)
+        commission = float(fees.get("commission") or 0.0)
+        stamp_duty = float(fees.get("stamp_duty") or 0.0)
+        transfer_fee = float(fees.get("transfer_fee") or 0.0)
+        total_fee = float(fees.get("total_fee") or 0.0)
+
+        cash_change = 0.0
+        realized_pnl = None
+
+        if action == "BUY":
+            cost = _round_money(amount + total_fee)
             if current_cash < cost:
                 return False, "资金不足"
-            
-            new_cash = current_cash - cost
-            
-            # Update Position
-            cursor.execute("SELECT quantity, avg_cost FROM trade_positions WHERE user_id=? AND code=?", (user_id, code))
-            res = cursor.fetchone()
-            if res:
-                old_q, old_cost = res
+
+            cash_change = -cost
+            new_cash = _round_money(current_cash + cash_change)
+
+            cursor.execute(
+                "SELECT quantity, avg_cost, open_time FROM trade_positions WHERE user_id=? AND code=?",
+                (user_id, code),
+            )
+            r = cursor.fetchone()
+            if r:
+                old_q = int(r[0] or 0)
+                old_avg = float(r[1] or 0.0)
+                open_time = str(r[2] or "").strip() if len(r) > 2 else ""
                 new_q = old_q + quantity
-                new_cost = ((old_q * old_cost) + cost) / new_q
-                cursor.execute("UPDATE trade_positions SET quantity=?, avg_cost=? WHERE user_id=? AND code=?", 
-                               (new_q, new_cost, user_id, code))
+                new_total_cost = (old_q * old_avg) + cost
+                new_avg = round(new_total_cost / new_q, 4)
+                if not open_time:
+                    open_time = trade_time
+                cursor.execute(
+                    """
+                    UPDATE trade_positions
+                    SET name=?, quantity=?, avg_cost=?, open_time=?, last_trade_time=?, updated_at=?
+                    WHERE user_id=? AND code=?
+                    """,
+                    (name, new_q, new_avg, open_time, trade_time, trade_time, user_id, code),
+                )
             else:
-                cursor.execute("INSERT INTO trade_positions (user_id, code, name, quantity, avg_cost) VALUES (?, ?, ?, ?, ?)", 
-                               (user_id, code, name, quantity, price))
-            
-        elif action == 'SELL':
-            income = amount - commission
-            
-            cursor.execute("SELECT quantity, avg_cost FROM trade_positions WHERE user_id=? AND code=?", (user_id, code))
-            res = cursor.fetchone()
-            if not res or res[0] < quantity:
+                avg_cost = round(cost / quantity, 4)
+                cursor.execute(
+                    """
+                    INSERT INTO trade_positions (user_id, code, name, quantity, avg_cost, open_time, last_trade_time, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, code, name, quantity, avg_cost, trade_time, trade_time, trade_time),
+                )
+
+        else:  # SELL
+            cursor.execute(
+                "SELECT quantity, avg_cost FROM trade_positions WHERE user_id=? AND code=?",
+                (user_id, code),
+            )
+            r = cursor.fetchone()
+            if not r or int(r[0] or 0) < quantity:
                 return False, "持仓不足"
-            
-            old_q, old_cost = res
+
+            old_q = int(r[0] or 0)
+            old_avg = float(r[1] or 0.0)
+
+            income = _round_money(amount - total_fee)
+            cash_change = income
+            new_cash = _round_money(current_cash + income)
+            realized_pnl = _round_money(income - (old_avg * quantity))
+
             new_q = old_q - quantity
-            new_cash = current_cash + income
-            
-            if new_q == 0:
+            if new_q <= 0:
                 cursor.execute("DELETE FROM trade_positions WHERE user_id=? AND code=?", (user_id, code))
             else:
-                cursor.execute("UPDATE trade_positions SET quantity=? WHERE user_id=? AND code=?", (new_q, user_id, code))
-        
+                cursor.execute(
+                    """
+                    UPDATE trade_positions
+                    SET quantity=?, last_trade_time=?, updated_at=?
+                    WHERE user_id=? AND code=?
+                    """,
+                    (new_q, trade_time, trade_time, user_id, code),
+                )
+
         # Update Account
-        cursor.execute("UPDATE trade_account SET cash=? WHERE user_id=?", (new_cash, user_id))
-        
+        cursor.execute(
+            "UPDATE trade_account SET cash=?, updated_at=? WHERE user_id=?",
+            (new_cash, trade_time, user_id),
+        )
+
         # Log Order
-        date_str = _now_beijing_str()
-        cursor.execute('''
-            INSERT INTO trade_orders (user_id, trade_date, code, name, action, price, quantity, amount, commission, balance_after, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, date_str, code, name, action, price, quantity, amount, commission, new_cash, date_str))
-        
+        cursor.execute(
+            """
+            INSERT INTO trade_orders (
+                user_id, trade_date, code, name, action, price, quantity, amount,
+                commission, stamp_duty, transfer_fee, total_fee, cash_change, realized_pnl,
+                balance_after, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                trade_date,
+                code,
+                name,
+                action,
+                price,
+                quantity,
+                amount,
+                commission,
+                stamp_duty,
+                transfer_fee,
+                total_fee,
+                cash_change,
+                realized_pnl,
+                new_cash,
+                trade_time,
+            ),
+        )
+
         conn.commit()
-        return True, f"交易成功! {action} {quantity}股"
+        fee_msg = f"费用{total_fee:.2f}(佣金{commission:.2f},印花{stamp_duty:.2f},过户{transfer_fee:.2f})"
+        return True, f"交易成功! {action} {quantity}股, {fee_msg}"
         
     except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return False, f"交易失败: {e}"
     finally:
         conn.close()

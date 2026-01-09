@@ -439,34 +439,50 @@ def render_buy_list(df, unique_key, user_id):
 
 def render_sell_list(df, user_id):
     """Renders holdings with 'Sell' buttons."""
-    cols = st.columns([1, 1.5, 1, 1, 1, 1.8, 0.8])
+    cols = st.columns([1, 1.5, 0.9, 1.5, 1, 1.2, 1.8, 0.8])
     cols[0].markdown("`代码`")
     cols[1].markdown("`名称`")
     cols[2].markdown("`持仓`")
-    cols[3].markdown("`现价`")
-    cols[4].markdown("`盈亏`")
-    cols[5].markdown("`提醒`")
-    cols[6].markdown("`操作`")
+    cols[3].markdown("`开仓时间`")
+    cols[4].markdown("`现价`")
+    cols[5].markdown("`盈亏(净)`")
+    cols[6].markdown("`提醒`")
+    cols[7].markdown("`操作`")
     
     st.markdown("---")
     
     for idx, row in df.iterrows():
-        c = st.columns([1, 1.5, 1, 1, 1, 1.8, 0.8])
+        c = st.columns([1, 1.5, 0.9, 1.5, 1, 1.2, 1.8, 0.8])
         c[0].write(row['code'])
         c[1].write(row['name'])
         c[2].write(str(row['quantity']))
-        c[3].write(f"{row.get('current_price', 0):.2f}")
+
+        open_time = row.get("open_time", "")
+        if not open_time:
+            open_time = "—"
+        c[3].write(str(open_time))
+
+        c[4].write(f"{row.get('current_price', 0):.2f}")
         
         pnl = row.get('profit', 0)
+        pnl_pct = row.get("profit_pct", 0.0)
+        try:
+            pnl = float(pnl or 0.0)
+        except Exception:
+            pnl = 0.0
+        try:
+            pnl_pct = float(pnl_pct or 0.0)
+        except Exception:
+            pnl_pct = 0.0
         color = "red" if pnl > 0 else "green"
-        c[4].markdown(f":{color}[{pnl:.0f}]")
+        c[5].markdown(f":{color}[{pnl:.0f} ({pnl_pct:.2f}%)]")
         
         advice = row.get("sell_advice", "—")
         if not advice:
             advice = "—"
-        c[5].markdown(advice)
+        c[6].markdown(advice)
 
-        if c[6].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
+        if c[7].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
             price = row.get('current_price', 0)
             if price > 0:
                 succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, 100)
@@ -672,7 +688,7 @@ elif page == "💼 我的持仓":
         if "holdings_use_realtime" not in st.session_state:
             st.session_state["holdings_use_realtime"] = False
 
-        st.caption("默认使用最新收盘价估值；盘中可刷新持仓实时价（仅持仓）用于止损/MA20 提醒。")
+        st.caption("默认使用最新收盘价估值；盘中可刷新持仓实时价（仅持仓）用于止损/MA20 提醒。盈亏/总资产按“卖出净到手”估算（含佣金/印花税/过户费）。")
         stop_loss_pct = st.slider(
             "盘中止损阈值(%)",
             min_value=1.0,
@@ -721,7 +737,7 @@ elif page == "💼 我的持仓":
     pnl_pct = pnl/100000*100
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 总资产", f"{total:,.0f}", f"{pnl:,.0f}")
+    c1.metric("💰 总资产(净)", f"{total:,.0f}", f"{pnl:,.0f}")
     c2.metric("💵 现金", f"{cash:,.0f}")
     c3.metric("📈 总收益", f"{pnl_pct:.2f}%")
     
@@ -825,4 +841,52 @@ elif page == "💼 我的持仓":
         # Filter orders by user_id
         h = pd.read_sql(f"SELECT * FROM trade_orders WHERE user_id='{current_user}' ORDER BY id DESC LIMIT 20", conn)
         conn.close()
-        st.dataframe(h)
+        if not h.empty:
+            if "action" in h.columns:
+                h["action"] = (
+                    h["action"]
+                    .astype(str)
+                    .str.upper()
+                    .map({"BUY": "买入", "SELL": "卖出"})
+                    .fillna(h["action"])
+                )
+
+            show_cols = [
+                "created_at",
+                "trade_date",
+                "action",
+                "code",
+                "name",
+                "price",
+                "quantity",
+                "amount",
+                "total_fee",
+                "commission",
+                "stamp_duty",
+                "transfer_fee",
+                "cash_change",
+                "realized_pnl",
+                "balance_after",
+            ]
+            h = h[[c for c in show_cols if c in h.columns]]
+            h = h.rename(
+                columns={
+                    "created_at": "交易时间(北京)",
+                    "trade_date": "交易日",
+                    "action": "方向",
+                    "code": "代码",
+                    "name": "名称",
+                    "price": "成交价",
+                    "quantity": "数量",
+                    "amount": "成交额",
+                    "total_fee": "总费用",
+                    "commission": "佣金",
+                    "stamp_duty": "印花税",
+                    "transfer_fee": "过户费",
+                    "cash_change": "现金变动",
+                    "realized_pnl": "本次已实现盈亏",
+                    "balance_after": "余额",
+                }
+            )
+
+        st.dataframe(h, use_container_width=True)
