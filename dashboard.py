@@ -638,24 +638,24 @@ elif page == "个股深度分析":
             if not df.empty:
                 st.header(f"{info['name']} ({code_input})")
                 fig = make_subplots(
-                rows=4, cols=1, 
-                shared_xaxes=True, 
-                row_heights=[0.4, 0.15, 0.25, 0.2],
-                subplot_titles=("📈 价格走势 (每日 K 线)", "📊 成交量 (手)", "💰 融资余额与净买入 (内资杠杆)", "🌊 北向持仓市值 (外资动向)")
-            )
-            fig.add_trace(go.Candlestick(x=df['trade_date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="日K"), row=1, col=1)
-            fig.add_trace(go.Bar(x=df['trade_date'], y=df['volume'], name="成交量"), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df['trade_date'], y=df['financing_balance'], fill='tozeroy', line=dict(color='orange'), name="融资余额"), row=3, col=1)
-            fig.add_trace(go.Bar(x=df['trade_date'], y=df['net_financing_buy'], marker_color='red', name="融资净买入"), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df['trade_date'], y=df['nb_hold_val'], line=dict(color='blue'), name="北向持仓"), row=4, col=1)
-            fig.update_layout(
+                    rows=4, cols=1, 
+                    shared_xaxes=True, 
+                    row_heights=[0.4, 0.15, 0.25, 0.2],
+                    subplot_titles=("📈 价格走势 (每日 K 线)", "📊 成交量 (手)", "💰 融资余额与净买入 (内资杠杆)", "🌊 北向持仓市值 (外资动向)")
+                )
+                fig.add_trace(go.Candlestick(x=df['trade_date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="日K"), row=1, col=1)
+                fig.add_trace(go.Bar(x=df['trade_date'], y=df['volume'], name="成交量"), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df['trade_date'], y=df['financing_balance'], fill='tozeroy', line=dict(color='orange'), name="融资余额"), row=3, col=1)
+                fig.add_trace(go.Bar(x=df['trade_date'], y=df['net_financing_buy'], marker_color='red', name="融资净买入"), row=3, col=1)
+                fig.add_trace(go.Scatter(x=df['trade_date'], y=df['nb_hold_val'], line=dict(color='blue'), name="北向持仓"), row=4, col=1)
+                fig.update_layout(
                     height=800, 
                     xaxis_rangeslider_visible=False, 
                     showlegend=False,
                     hovermode="x unified",
                     xaxis_tickformat="%Y-%m-%d"
                 )
-            st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error("代码无效")
     except Exception as e:
