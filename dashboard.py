@@ -439,20 +439,23 @@ def render_buy_list(df, unique_key, user_id):
 
 def render_sell_list(df, user_id):
     """Renders holdings with 'Sell' buttons."""
-    cols = st.columns([1, 1.5, 0.9, 1.5, 1, 1.2, 1.8, 0.8])
+    # Adjusted columns to fit buttons
+    cols = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
     cols[0].markdown("`代码`")
     cols[1].markdown("`名称`")
     cols[2].markdown("`持仓`")
     cols[3].markdown("`开仓时间`")
-    cols[4].markdown("`现价`")
-    cols[5].markdown("`盈亏(净)`")
-    cols[6].markdown("`提醒`")
-    cols[7].markdown("`操作`")
+    cols[4].markdown("`成本`")
+    cols[5].markdown("`现价`")
+    cols[6].markdown("`市值`")
+    cols[7].markdown("`盈亏(净)`")
+    cols[8].markdown("`提醒`")
+    cols[9].markdown("`操作`")
     
     st.markdown("---")
     
     for idx, row in df.iterrows():
-        c = st.columns([1, 1.5, 0.9, 1.5, 1, 1.2, 1.8, 0.8])
+        c = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
         c[0].write(row['code'])
         c[1].write(row['name'])
         c[2].write(str(row['quantity']))
@@ -462,7 +465,17 @@ def render_sell_list(df, user_id):
             open_time = "—"
         c[3].write(str(open_time))
 
-        c[4].write(f"{row.get('current_price', 0):.2f}")
+        # Cost
+        avg_cost = row.get("avg_cost", 0.0)
+        c[4].write(f"{avg_cost:.2f}")
+
+        # Current Price
+        curr_price = row.get('current_price', 0)
+        c[5].write(f"{curr_price:.2f}")
+
+        # Market Value
+        mkt_val = row.get("market_value", 0.0)
+        c[6].write(f"{mkt_val:,.0f}")
         
         pnl = row.get('profit', 0)
         pnl_pct = row.get("profit_pct", 0.0)
@@ -475,24 +488,40 @@ def render_sell_list(df, user_id):
         except Exception:
             pnl_pct = 0.0
         color = "red" if pnl > 0 else "green"
-        c[5].markdown(f":{color}[{pnl:.0f} ({pnl_pct:.2f}%)]")
+        # P&L
+        c[7].markdown(f":{color}[{pnl:,.0f} ({pnl_pct:.2f}%)]")
         
         advice = row.get("sell_advice", "—")
         if not advice:
             advice = "—"
-        c[6].markdown(advice)
+        c[8].markdown(advice)
 
-        # Get quantity from sidebar, default to 100, clamp to holdings
-        target_qty = st.session_state.get("side_qty", 100)
+        # Action Buttons
         held_qty = int(row['quantity'])
+        target_qty = st.session_state.get("side_qty", 100)
         sell_qty = min(target_qty, held_qty)
-
-        if c[7].button(f"🔴 卖 {sell_qty}", key=f"btn_sell_{user_id}_{row['code']}"):
+        
+        btn_cols = c[9].columns(2)
+        # Button 1: Partial Sell
+        if btn_cols[0].button(f"卖", key=f"btn_sell_{user_id}_{row['code']}", help=f"卖出 {sell_qty} 股"):
             price = row.get('current_price', 0)
             if price > 0:
                 succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, sell_qty)
                 if succ: 
                     st.toast(f"✅ {msg}")
+                    st.rerun() 
+                else: 
+                    st.toast(f"❌ {msg}")
+            else:
+                st.toast("⚠️ 无法获取价格")
+
+        # Button 2: Sell All
+        if btn_cols[1].button(f"清", key=f"btn_all_{user_id}_{row['code']}", help=f"一键清仓 ({held_qty} 股)"):
+            price = row.get('current_price', 0)
+            if price > 0:
+                succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, held_qty)
+                if succ: 
+                    st.toast(f"✅ 清仓成功")
                     st.rerun() 
                 else: 
                     st.toast(f"❌ {msg}")
@@ -512,7 +541,7 @@ if st.sidebar.button("🔄 刷新界面/计算信号"):
 
 get_realtime = st.sidebar.button("📡 获取实时行情 (盘中)")
 
-page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"])
+page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"], index=3)
 # --- Flash Trade Panel ---
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"⚡ 闪电交易 ({current_user})")
@@ -671,14 +700,38 @@ elif page == "💼 我的持仓":
             cursor = db.get_cursor(conn)
             cursor.execute("SELECT code FROM trade_positions WHERE user_id=?", (current_user,))
             held_codes = [str(r[0]).zfill(6) for r in cursor.fetchall()]
-            for code in held_codes:
-                cursor.execute(
-                    "SELECT close FROM daily_market WHERE code=? ORDER BY trade_date DESC LIMIT 1",
-                    (code,),
-                )
-                res = cursor.fetchone()
-                if res and res[0] is not None:
-                    last_close_lookup[code] = float(res[0])
+            
+            if held_codes:
+                # Optimized: Batch fetch last close for all held codes
+                # Fetch last 30 days to cover suspensions/holidays
+                placeholders = ",".join(["?"] * len(held_codes))
+                # Get max date first to limit range efficiently
+                cursor.execute("SELECT MAX(trade_date) FROM daily_market")
+                max_date_res = cursor.fetchone()
+                if max_date_res and max_date_res[0]:
+                    max_d = datetime.datetime.strptime(str(max_date_res[0]), "%Y-%m-%d")
+                    start_d = max_d - datetime.timedelta(days=30)
+                    start_d_str = start_d.strftime("%Y-%m-%d")
+                    
+                    sql = f"""
+                        SELECT code, close, trade_date 
+                        FROM daily_market 
+                        WHERE code IN ({placeholders}) 
+                        AND trade_date >= ?
+                        ORDER BY trade_date DESC
+                    """
+                    # Provide codes as params, plus start_date
+                    params = held_codes + [start_d_str]
+                    cursor.execute(sql, params)
+                    rows = cursor.fetchall()
+                    
+                    # Process in Python: keep first (latest) close for each code
+                    seen = set()
+                    for r in rows:
+                        c, p, d = r[0], r[1], r[2]
+                        if c not in seen and p is not None:
+                            last_close_lookup[c] = float(p)
+                            seen.add(c)
         finally:
             try:
                 if conn is not None:

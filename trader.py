@@ -330,45 +330,60 @@ def get_account_info(user_id, price_lookup=None):
             # Backfill open_time / last_trade_time for old rows (best effort).
             if "open_time" in positions.columns:
                 try:
-                    missing = positions["open_time"].isna() | (
+                    missing_mask = positions["open_time"].isna() | (
                         positions["open_time"].astype(str).str.strip() == ""
                     )
-                    for idx in positions[missing].index.tolist():
-                        c = str(positions.loc[idx, "code"] or "").zfill(6)
-                        cursor.execute(
-                            "SELECT MIN(created_at) FROM trade_orders WHERE user_id=? AND code=? AND action='BUY'",
-                            (user_id, c),
-                        )
-                        r = cursor.fetchone()
-                        if r and r[0]:
-                            t = str(r[0])
-                            positions.loc[idx, "open_time"] = t
+                    missing_codes = positions.loc[missing_mask, "code"].unique().tolist()
+                    
+                    if missing_codes:
+                        missing_codes = [str(c).zfill(6) for c in missing_codes if c]
+                        if missing_codes:
+                            placeholders = ",".join(["?"] * len(missing_codes))
                             cursor.execute(
-                                "UPDATE trade_positions SET open_time=? WHERE user_id=? AND code=?",
-                                (t, user_id, c),
+                                f"SELECT code, MIN(created_at) FROM trade_orders WHERE user_id=? AND action='BUY' AND code IN ({placeholders}) GROUP BY code",
+                                [user_id] + missing_codes,
                             )
+                            found_map = {row[0]: row[1] for row in cursor.fetchall()}
+                            
+                            for idx in positions[missing_mask].index.tolist():
+                                c = str(positions.loc[idx, "code"] or "").zfill(6)
+                                if c in found_map and found_map[c]:
+                                    t = str(found_map[c])
+                                    positions.loc[idx, "open_time"] = t
+                                    # Update DB individually (still safer than batch update with joins in SQLite)
+                                    cursor.execute(
+                                        "UPDATE trade_positions SET open_time=? WHERE user_id=? AND code=?",
+                                        (t, user_id, c),
+                                    )
                 except Exception:
                     pass
 
             if "last_trade_time" in positions.columns:
                 try:
-                    missing = positions["last_trade_time"].isna() | (
+                    missing_mask = positions["last_trade_time"].isna() | (
                         positions["last_trade_time"].astype(str).str.strip() == ""
                     )
-                    for idx in positions[missing].index.tolist():
-                        c = str(positions.loc[idx, "code"] or "").zfill(6)
-                        cursor.execute(
-                            "SELECT MAX(created_at) FROM trade_orders WHERE user_id=? AND code=?",
-                            (user_id, c),
-                        )
-                        r = cursor.fetchone()
-                        if r and r[0]:
-                            t = str(r[0])
-                            positions.loc[idx, "last_trade_time"] = t
+                    missing_codes = positions.loc[missing_mask, "code"].unique().tolist()
+                    
+                    if missing_codes:
+                        missing_codes = [str(c).zfill(6) for c in missing_codes if c]
+                        if missing_codes:
+                            placeholders = ",".join(["?"] * len(missing_codes))
                             cursor.execute(
-                                "UPDATE trade_positions SET last_trade_time=? WHERE user_id=? AND code=?",
-                                (t, user_id, c),
+                                f"SELECT code, MAX(created_at) FROM trade_orders WHERE user_id=? AND code IN ({placeholders}) GROUP BY code",
+                                [user_id] + missing_codes,
                             )
+                            found_map = {row[0]: row[1] for row in cursor.fetchall()}
+                            
+                            for idx in positions[missing_mask].index.tolist():
+                                c = str(positions.loc[idx, "code"] or "").zfill(6)
+                                if c in found_map and found_map[c]:
+                                    t = str(found_map[c])
+                                    positions.loc[idx, "last_trade_time"] = t
+                                    cursor.execute(
+                                        "UPDATE trade_positions SET last_trade_time=? WHERE user_id=? AND code=?",
+                                        (t, user_id, c),
+                                    )
                 except Exception:
                     pass
         
