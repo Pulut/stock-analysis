@@ -620,26 +620,30 @@ if page == "市场概览":
 
 # --- Page 3: Deep Dive ---
 elif page == "个股深度分析":
-    st.title("📈 个股资金透视")
-    
-    if "deep_dive_input" not in st.session_state:
-        st.session_state["deep_dive_input"] = ""
+    try:
+        st.title("📈 个股资金透视")
         
-    code_input = st.text_input("输入代码", key="deep_dive_input")
-    if code_input:
-        df, info = get_stock_history(code_input)
-        if not df.empty:
-            st.header(f"{info['name']} ({code_input})")
-            fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.4,0.15,0.25,0.2])
-            fig.add_trace(go.Candlestick(x=df['trade_date'], open=df['open'], high=df['high'], low=df['low'], close=df['close']), row=1, col=1)
-            fig.add_trace(go.Bar(x=df['trade_date'], y=df['volume']), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df['trade_date'], y=df['financing_balance'], fill='tozeroy', line=dict(color='orange')), row=3, col=1)
-            fig.add_trace(go.Bar(x=df['trade_date'], y=df['net_financing_buy'], marker_color='red'), row=3, col=1)
-            fig.add_trace(go.Scatter(x=df['trade_date'], y=df['nb_hold_val'], line=dict(color='blue')), row=4, col=1)
-            fig.update_layout(height=800, xaxis_rangeslider_visible=False, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("代码无效")
+        if "deep_dive_input" not in st.session_state:
+            st.session_state["deep_dive_input"] = ""
+            
+        code_input = st.text_input("输入代码", key="deep_dive_input")
+        if code_input:
+            df, info = get_stock_history(code_input)
+            if not df.empty:
+                st.header(f"{info['name']} ({code_input})")
+                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.4,0.15,0.25,0.2])
+                fig.add_trace(go.Candlestick(x=df['trade_date'], open=df['open'], high=df['high'], low=df['low'], close=df['close']), row=1, col=1)
+                fig.add_trace(go.Bar(x=df['trade_date'], y=df['volume']), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df['trade_date'], y=df['financing_balance'], fill='tozeroy', line=dict(color='orange')), row=3, col=1)
+                fig.add_trace(go.Bar(x=df['trade_date'], y=df['net_financing_buy'], marker_color='red'), row=3, col=1)
+                fig.add_trace(go.Scatter(x=df['trade_date'], y=df['nb_hold_val'], line=dict(color='blue')), row=4, col=1)
+                fig.update_layout(height=800, xaxis_rangeslider_visible=False, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error("代码无效")
+    except Exception as e:
+        st.error(f"发生错误: {e}")
+        st.exception(e)
 
 # --- Page 4: Portfolio ---
 elif page == "💼 我的持仓":
