@@ -393,7 +393,7 @@ def render_sell_list(df, user_id):
         c = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
         # Code - Clickable to Deep Dive
         if c[0].button(row['code'], key=f"btn_code_{user_id}_{row['code']}"):
-            st.session_state["target_code"] = row['code']
+            st.session_state["deep_dive_input"] = row['code']
             st.session_state["sb_nav"] = "个股深度分析"
             st.rerun()
         c[1].write(row['name'])
@@ -621,8 +621,11 @@ if page == "市场概览":
 # --- Page 3: Deep Dive ---
 elif page == "个股深度分析":
     st.title("📈 个股资金透视")
-    default_code = st.session_state.get("target_code", "")
-    code_input = st.text_input("输入代码", default_code)
+    
+    if "deep_dive_input" not in st.session_state:
+        st.session_state["deep_dive_input"] = ""
+        
+    code_input = st.text_input("输入代码", key="deep_dive_input")
     if code_input:
         df, info = get_stock_history(code_input)
         if not df.empty:
