@@ -237,68 +237,7 @@ def load_northbound_top10_deal(conn):
     return df[["Code", "mutual_type", "rank", "deal_amt"]], max_date
 
 
-def render_northbound_deal_list(df, unique_key, user_id):
-    """Render Northbound Top 10 deal list with Buy buttons."""
 
-    def _fmt_deal_yi(v):
-        try:
-            v = float(v)
-        except Exception:
-            return "—"
-        return f"{v/100000000:.2f}亿"
-
-    def _fmt_chg(v):
-        try:
-            v = float(v)
-        except Exception:
-            return "—"
-        color = "red" if v > 0 else "green"
-        return f":{color}[{v:.2f}%]"
-
-    def _mt_label(mt):
-        if mt == "001":
-            return "沪"
-        if mt == "003":
-            return "深"
-        return str(mt or "-")
-
-    cols = st.columns([0.8, 1.2, 1.0, 0.9, 0.8, 0.8])
-    cols[0].markdown("**代码**")
-    cols[1].markdown("**名称**")
-    cols[2].markdown("**北向成交额**")
-    cols[3].markdown("**现价**")
-    cols[4].markdown("**涨跌**")
-    cols[5].markdown("**操作**")
-    st.markdown("---")
-
-    for _, row in df.iterrows():
-        c = st.columns([0.8, 1.2, 1.0, 0.9, 0.8, 0.8])
-        code = row.get("Code", "")
-        name = row.get("Name", "-")
-        mt = _mt_label(row.get("mutual_type"))
-        rank = row.get("rank", "")
-        c[0].write(code)
-        c[1].write(f"{name} ({mt}{rank})")
-        c[2].write(_fmt_deal_yi(row.get("deal_amt")))
-
-        price = row.get("Real_Price", row.get("Close", 0))
-        try:
-            c[3].write(f"{float(price):.2f}")
-        except Exception:
-            c[3].write("-")
-        c[4].markdown(_fmt_chg(row.get("Real_Chg_Pct", 0)))
-
-        if c[5].button("🛒 买", key=f"btn_buy_northdeal_{unique_key}_{user_id}_{code}"):
-            try:
-                price = float(price)
-            except Exception:
-                price = 0
-            if price > 0:
-                succ, msg = trader.execute_trade(user_id, 'BUY', code, name, price, 100)
-                if succ:
-                    st.toast(f"✅ {msg}")
-                else:
-                    st.toast(f"❌ {msg}")
             else:
                 st.toast("⚠️ 无法获取价格")
 
@@ -456,7 +395,11 @@ def render_sell_list(df, user_id):
     
     for idx, row in df.iterrows():
         c = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
-        c[0].write(row['code'])
+        # Code - Clickable to Deep Dive
+        if c[0].button(row['code'], key=f"btn_code_{user_id}_{row['code']}"):
+            st.session_state["target_code"] = row['code']
+            st.session_state["sb_nav"] = "个股深度分析"
+            st.rerun()
         c[1].write(row['name'])
         c[2].write(str(row['quantity']))
 
@@ -533,7 +476,7 @@ st.sidebar.title("🚀 A股资金流向分析")
 
 # User Selection
 current_user = st.sidebar.selectbox("👤 当前用户", ["user1", "user2"])
-st.sidebar.caption(f"🗄️ 数据库: {db.describe_database()}")
+st.sidebar.caption(f"🚀 A股资金流向分析系统")
 
 if st.sidebar.button("🔄 刷新界面/计算信号"):
     st.cache_data.clear()
@@ -541,7 +484,10 @@ if st.sidebar.button("🔄 刷新界面/计算信号"):
 
 get_realtime = st.sidebar.button("📡 获取实时行情 (盘中)")
 
-page = st.sidebar.radio("功能导航", ["市场概览", "智能选股", "个股深度分析", "💼 我的持仓"], index=3)
+if "sb_nav" not in st.session_state:
+    st.session_state["sb_nav"] = "💼 我的持仓"
+
+page = st.sidebar.radio("功能导航", ["市场概览", "个股深度分析", "💼 我的持仓"], key="sb_nav")
 # --- Flash Trade Panel ---
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"⚡ 闪电交易 ({current_user})")
@@ -635,42 +581,52 @@ if page == "市场概览":
         merged = pd.merge(nb_top10_df, report_df, on="Code", how="left")
         if "Name" not in merged.columns:
             merged["Name"] = merged["Code"]
+        
+        # Resolve conflicting column names from merge if necessary
+        # report_df has 'Name', 'Close', etc. nb_top10_df has 'name' (maybe), 'deal_amt'
+        # Prioritize report_df data for display in render_buy_list
+        if "Name_y" in merged.columns:
+            merged["Name"] = merged["Name_y"].fillna(merged["Name_x"])
+        
         merged = merged.sort_values(["deal_amt", "rank"], ascending=[False, True]).head(10)
-        render_northbound_deal_list(merged, "north_deal", current_user)
+        
+        # Use render_buy_list for consistent display
+        render_buy_list(merged, "north_deal", current_user)
 
     st.markdown("---")
 
-    st.subheader("⚠️ 风险预警 (资金大幅流出 Top 10)")
-    # Sort by Surge Score ascending (most negative first)
-    top_risk = report_df[report_df['Surge Score'] < 0].sort_values(by="Surge Score", ascending=True).head(10)
-    render_buy_list(top_risk, "risk", current_user)
+    # st.subheader("⚠️ 风险预警 (资金大幅流出 Top 10)")
+    # # Sort by Surge Score ascending (most negative first)
+    # top_risk = report_df[report_df['Surge Score'] < 0].sort_values(by="Surge Score", ascending=True).head(10)
+    # render_buy_list(top_risk, "risk", current_user)
 
 # --- Page 2: Smart Scanner ---
-elif page == "智能选股":
-    st.title("📡 智能信号筛选器")
-    report_df = load_report_df(get_realtime)
-    
-    c1, c2, c3, c4 = st.columns(4)
-    sig = c1.multiselect("信号", report_df['Signal'].unique())
-    ind = c2.multiselect("行业", report_df['Industry'].unique())
-    sec = c3.multiselect("板块", report_df['Sector'].unique())
-    min_t = c4.slider("换手%", 0.0, 20.0, 1.0)
-    
-    filtered = report_df.copy()
-    if sig: filtered = filtered[filtered['Signal'].isin(sig)]
-    if ind: filtered = filtered[filtered['Industry'].isin(ind)]
-    if sec: filtered = filtered[filtered['Sector'].isin(sec)]
-    filtered = filtered[filtered['Turnover%'] >= min_t]
-    
-    st.caption(f"筛选结果: {len(filtered)} 只 (显示前 50 只)")
-    
-    # Render List
-    render_buy_list(filtered.head(50), "scanner", current_user)
+# elif page == "智能选股":
+#     st.title("📡 智能信号筛选器")
+#     report_df = load_report_df(get_realtime)
+#    
+#     c1, c2, c3, c4 = st.columns(4)
+#     sig = c1.multiselect("信号", report_df['Signal'].unique())
+#     ind = c2.multiselect("行业", report_df['Industry'].unique())
+#     sec = c3.multiselect("板块", report_df['Sector'].unique())
+#     min_t = c4.slider("换手%", 0.0, 20.0, 1.0)
+#    
+#     filtered = report_df.copy()
+#     if sig: filtered = filtered[filtered['Signal'].isin(sig)]
+#     if ind: filtered = filtered[filtered['Industry'].isin(ind)]
+#     if sec: filtered = filtered[filtered['Sector'].isin(sec)]
+#     filtered = filtered[filtered['Turnover%'] >= min_t]
+#    
+#     st.caption(f"筛选结果: {len(filtered)} 只 (显示前 50 只)")
+#    
+#     # Render List
+#     render_buy_list(filtered.head(50), "scanner", current_user)
 
 # --- Page 3: Deep Dive ---
 elif page == "个股深度分析":
     st.title("📈 个股资金透视")
-    code_input = st.text_input("输入代码", "600000")
+    default_code = st.session_state.get("target_code", "")
+    code_input = st.text_input("输入代码", default_code)
     if code_input:
         df, info = get_stock_history(code_input)
         if not df.empty:
