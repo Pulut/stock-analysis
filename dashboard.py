@@ -637,13 +637,24 @@ elif page == "个股深度分析":
             df, info = get_stock_history(code_input)
             if not df.empty:
                 st.header(f"{info['name']} ({code_input})")
-                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.4,0.15,0.25,0.2])
+                fig = make_subplots(
+                rows=4, cols=1, 
+                shared_xaxes=True, 
+                row_heights=[0.4, 0.15, 0.25, 0.2],
+                subplot_titles=("📈 价格走势", "📊 成交量", "💰 融资数据 (内资杠杆)", "🌊 北向持仓 (外资动向)")
+            )
                 fig.add_trace(go.Candlestick(x=df['trade_date'], open=df['open'], high=df['high'], low=df['low'], close=df['close']), row=1, col=1)
                 fig.add_trace(go.Bar(x=df['trade_date'], y=df['volume']), row=2, col=1)
                 fig.add_trace(go.Scatter(x=df['trade_date'], y=df['financing_balance'], fill='tozeroy', line=dict(color='orange')), row=3, col=1)
                 fig.add_trace(go.Bar(x=df['trade_date'], y=df['net_financing_buy'], marker_color='red'), row=3, col=1)
                 fig.add_trace(go.Scatter(x=df['trade_date'], y=df['nb_hold_val'], line=dict(color='blue')), row=4, col=1)
-                fig.update_layout(height=800, xaxis_rangeslider_visible=False, showlegend=False)
+                fig.update_layout(
+                    height=800, 
+                    xaxis_rangeslider_visible=False, 
+                    showlegend=False,
+                    hovermode="x unified",
+                    xaxis_tickformat="%Y-%m-%d"
+                )
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error("代码无效")
