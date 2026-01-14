@@ -391,11 +391,17 @@ def render_sell_list(df, user_id):
     
     for idx, row in df.iterrows():
         c = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
-        # Code - Clickable to Deep Dive
-        if c[0].button(row['code'], key=f"btn_code_{user_id}_{row['code']}"):
-            st.session_state["deep_dive_input"] = row['code']
+        # Code - Clickable to Deep Dive using Callback to avoid State error
+        def _go_to_deep_dive(target_code):
+            st.session_state["deep_dive_input"] = target_code
             st.session_state["sb_nav"] = "个股深度分析"
-            st.rerun()
+
+        c[0].button(
+            row['code'], 
+            key=f"btn_code_{user_id}_{row['code']}",
+            on_click=_go_to_deep_dive,
+            kwargs={"target_code": row['code']}
+        )
         c[1].write(row['name'])
         c[2].write(str(row['quantity']))
 
