@@ -482,10 +482,15 @@ def render_sell_list(df, user_id):
             advice = "—"
         c[6].markdown(advice)
 
-        if c[7].button("🔴 卖", key=f"btn_sell_{user_id}_{row['code']}"):
+        # Get quantity from sidebar, default to 100, clamp to holdings
+        target_qty = st.session_state.get("side_qty", 100)
+        held_qty = int(row['quantity'])
+        sell_qty = min(target_qty, held_qty)
+
+        if c[7].button(f"🔴 卖 {sell_qty}", key=f"btn_sell_{user_id}_{row['code']}"):
             price = row.get('current_price', 0)
             if price > 0:
-                succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, 100)
+                succ, msg = trader.execute_trade(user_id, 'SELL', row['code'], row['name'], price, sell_qty)
                 if succ: 
                     st.toast(f"✅ {msg}")
                     st.rerun() 
