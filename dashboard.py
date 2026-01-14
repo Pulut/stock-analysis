@@ -237,10 +237,6 @@ def load_northbound_top10_deal(conn):
     return df[["Code", "mutual_type", "rank", "deal_amt"]], max_date
 
 
-
-            else:
-                st.toast("⚠️ 无法获取价格")
-
 # --- Custom Table Renderers with Buttons ---
 def render_buy_list(df, unique_key, user_id):
     """Renders a detailed list of stocks with 'Buy' buttons."""
