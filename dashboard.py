@@ -655,7 +655,7 @@ elif page == "个股深度分析":
                     hovermode="x unified",
                     xaxis_tickformat="%Y-%m-%d"
                 )
-                st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error("代码无效")
     except Exception as e:
