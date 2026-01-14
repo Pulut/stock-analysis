@@ -376,16 +376,16 @@ def render_sell_list(df, user_id):
     """Renders holdings with 'Sell' buttons."""
     # Adjusted columns to fit buttons
     cols = st.columns([1, 1.2, 0.8, 1.4, 1, 1, 1.2, 1.3, 1.6, 1.3])
-    cols[0].markdown("`代码`")
-    cols[1].markdown("`名称`")
-    cols[2].markdown("`持仓`")
-    cols[3].markdown("`开仓时间`")
-    cols[4].markdown("`成本`")
-    cols[5].markdown("`现价`")
-    cols[6].markdown("`市值`")
-    cols[7].markdown("`盈亏(净)`")
-    cols[8].markdown("`提醒`")
-    cols[9].markdown("`操作`")
+    cols[0].markdown("**代码**")
+    cols[1].markdown("**名称**")
+    cols[2].markdown("**持仓**")
+    cols[3].markdown("**开仓时间**")
+    cols[4].markdown("**成本**")
+    cols[5].markdown("**现价**")
+    cols[6].markdown("**市值**")
+    cols[7].markdown("**盈亏(净)**")
+    cols[8].markdown("**提醒**")
+    cols[9].markdown("**操作**")
     
     st.markdown("---")
     
@@ -774,9 +774,9 @@ elif page == "💼 我的持仓":
     pnl_pct = pnl/100000*100
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 总资产(净)", f"{total:,.0f}", f"{pnl:,.0f}")
+    c1.metric("💰 总资产(净)", f"{total:,.0f}", f"{pnl:,.0f}", delta_color="inverse")
     c2.metric("💵 现金", f"{cash:,.0f}")
-    c3.metric("📈 总收益", f"{pnl_pct:.2f}%")
+    c3.metric("📈 总收益", f"{pnl_pct:.2f}%", f"{pnl:,.0f}", delta_color="inverse")
     
     st.subheader("持仓列表")
     if not pos.empty:
