@@ -721,7 +721,7 @@ elif page == "💼 我的持仓":
         if "holdings_rt_ts" not in st.session_state:
             st.session_state["holdings_rt_ts"] = ""
         if "holdings_use_realtime" not in st.session_state:
-            st.session_state["holdings_use_realtime"] = False
+            st.session_state["holdings_use_realtime"] = True
 
         st.caption("默认使用最新收盘价估值；盘中可刷新持仓实时价（仅持仓）用于止损/MA20 提醒。盈亏/总资产按“卖出净到手”估算（含佣金/印花税/过户费）。")
         stop_loss_pct = st.slider(
